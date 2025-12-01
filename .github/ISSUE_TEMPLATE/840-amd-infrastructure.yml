@@ -4,7 +4,73 @@ title: "[AMD Infra]: "
 labels: ["infrastructure", "rocm", "amd", "needs-triage"]
 
 body:
-  # Template content to be added
   - type: markdown
     attributes:
-      value: "AMD Infrastructure Issue - Content to be configured"
+      value: |
+        ## AMD Infrastructure Issue
+
+        Report problems with: Docker builds • CI/CD pipeline • Build system • Development tools
+
+  - type: dropdown
+    id: issue-category
+    attributes:
+      label: What's broken?
+      options:
+        - Docker image / container build
+        - CI/CD pipeline / Buildkite
+        - Building from source
+        - Dependencies / environment
+        - Test infrastructure
+        - Other tooling
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's happening?
+      placeholder: |
+        Docker build fails when installing ROCm dependencies.
+        Error: "Unable to locate package rocm-dev"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - Low - Minor inconvenience
+        - Medium - Workaround exists
+        - High - Blocks specific workflows
+        - Critical - Blocks all work
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-logs
+    attributes:
+      label: Error logs
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-fix
+    attributes:
+      label: Proposed fix (if known)
+      placeholder: Need to add ROCm GPG key before apt install...
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      placeholder: Buildkite link, related issues, etc.

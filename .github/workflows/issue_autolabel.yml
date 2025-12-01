@@ -468,30 +468,35 @@ jobs:
             const ccConfig = {
               // Core ROCm maintainers
               rocm: {
-                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm', 'akaratza'],
                 message: 'CC {users} for ROCm-related issue'
+              },
+              // AMD CI issues - notify CI owners
+              "amd-ci": {
+                users: ['akaratza', 'kennyroche'],
+                message: 'CC {users} for AMD CI issue'
               },
               // Hardware-specific
               "mi300x": {
-                users: ['hongxiayang', 'tjtanaa'],
+                users: ['hongxiayang', 'tjtanaa', 'akaratza'],
                 message: 'CC {users} for MI300X hardware issue'
               },
               "mi325x": {
-                users: ['hongxiayang', 'tjtanaa'],
+                users: ['hongxiayang', 'tjtanaa', 'akaratza'],
                 message: 'CC {users} for MI325X hardware issue'
               },
               // Component-specific
               "aiter-backend": {
-                users: ['tjtanaa'],
+                users: ['tjtanaa', 'akaratza'],
                 message: 'CC {users} for AITER backend issue'
               },
               "rccl": {
-                users: ['hongxiayang'],
+                users: ['hongxiayang', 'akaratza'],
                 message: 'CC {users} for RCCL communication issue'
               },
               // Blockers - notify full team
               "rocm-blocker": {
-                users: ['hongxiayang', 'tjtanaa', 'gshtras', 'vllmellm'],
+                users: ['hongxiayang', 'tjtanaa', 'gshtras', 'vllmellm', 'akaratza', 'kennyroche'],
                 message: 'CC {users} - ROCm blocker issue needs attention'
               },
             };
