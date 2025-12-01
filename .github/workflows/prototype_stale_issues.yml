@@ -1,0 +1,187 @@
+name: "[PROTOTYPE] Stale AMD Issue Management"
+
+# PROTOTYPE: Manages stale AMD-related issues
+# - Warns after 30 days of inactivity
+# - Closes after 14 more days without response
+# - Excludes P0/P1 issues and those with certain labels
+#
+# STATUS: Ready for testing
+
+on:
+  schedule:
+    # Run daily at 2am UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (no changes made)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  stale:
+    name: Mark Stale AMD Issues
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Process stale issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isDryRun = '${{ inputs.dry_run }}' === 'true' || '${{ github.event_name }}' === 'schedule';
+
+            const config = {
+              daysBeforeStale: 30,
+              daysBeforeClose: 14,
+              staleLabel: 'stale',
+              exemptLabels: [
+                'P0-critical',
+                'P1-high',
+                'rocm-blocker',
+                'in-progress',
+                'investigating',
+                'blocked',
+                'help-wanted',
+                'good-first-issue',
+              ],
+              amdLabels: ['rocm', 'amd', 'amd-ci'],
+            };
+
+            const now = new Date();
+            const staleDate = new Date(now - config.daysBeforeStale * 24 * 60 * 60 * 1000);
+            const closeDate = new Date(now - (config.daysBeforeStale + config.daysBeforeClose) * 24 * 60 * 60 * 1000);
+
+            // Get all open AMD issues
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            const toWarn = [];
+            const toClose = [];
+            const skipped = [];
+
+            for (const issue of issues) {
+              // Skip PRs
+              if (issue.pull_request) continue;
+
+              const labels = issue.labels.map(l => l.name);
+
+              // Only process AMD issues
+              const isAmd = labels.some(l => config.amdLabels.includes(l));
+              if (!isAmd) continue;
+
+              // Skip exempt labels
+              const isExempt = labels.some(l => config.exemptLabels.includes(l));
+              if (isExempt) {
+                skipped.push({ number: issue.number, reason: 'exempt label' });
+                continue;
+              }
+
+              const updatedAt = new Date(issue.updated_at);
+              const isStale = labels.includes(config.staleLabel);
+
+              if (isStale && updatedAt < closeDate) {
+                // Already stale and past close date
+                toClose.push({
+                  number: issue.number,
+                  title: issue.title,
+                  lastUpdate: updatedAt.toISOString().split('T')[0],
+                });
+              } else if (!isStale && updatedAt < staleDate) {
+                // Not stale but inactive
+                toWarn.push({
+                  number: issue.number,
+                  title: issue.title,
+                  lastUpdate: updatedAt.toISOString().split('T')[0],
+                  daysSinceUpdate: Math.floor((now - updatedAt) / (24 * 60 * 60 * 1000)),
+                });
+              }
+            }
+
+            core.info(`=== Stale Issue Report ===`);
+            core.info(`To warn: ${toWarn.length}`);
+            core.info(`To close: ${toClose.length}`);
+            core.info(`Skipped (exempt): ${skipped.length}`);
+
+            if (!isDryRun) {
+              // Add stale label and warning comment
+              for (const issue of toWarn) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: [config.staleLabel],
+                });
+
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `👋 **This issue has been marked as stale.**\n\n` +
+                        `It has been ${issue.daysSinceUpdate} days since the last update. ` +
+                        `If this issue is still relevant, please:\n\n` +
+                        `- Add a comment with an update\n` +
+                        `- Remove the \`stale\` label\n\n` +
+                        `This issue will be automatically closed in ${config.daysBeforeClose} days ` +
+                        `if there is no activity.\n\n` +
+                        `_To prevent this, add a \`help-wanted\` or \`in-progress\` label._`
+                });
+              }
+
+              // Close stale issues
+              for (const issue of toClose) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `🔒 **This issue has been closed due to inactivity.**\n\n` +
+                        `If this issue is still relevant, please reopen it with additional context.`
+                });
+
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                  state_reason: 'not_planned',
+                });
+              }
+            }
+
+            // Generate summary
+            let summary = '## Stale Issue Management Report\n\n';
+            summary += `**Run type:** ${isDryRun ? 'Dry Run' : 'Live'}\n`;
+            summary += `**Timestamp:** ${now.toISOString()}\n\n`;
+
+            if (toWarn.length > 0) {
+              summary += '### ⚠️ Marked as Stale\n\n';
+              for (const i of toWarn) {
+                summary += `- [#${i.number}](${context.payload.repository.html_url}/issues/${i.number}) - ${i.daysSinceUpdate} days inactive\n`;
+              }
+              summary += '\n';
+            }
+
+            if (toClose.length > 0) {
+              summary += '### 🔒 Closed as Stale\n\n';
+              for (const i of toClose) {
+                summary += `- [#${i.number}](${context.payload.repository.html_url}/issues/${i.number})\n`;
+              }
+              summary += '\n';
+            }
+
+            if (toWarn.length === 0 && toClose.length === 0) {
+              summary += '✅ No stale AMD issues found!\n';
+            }
+
+            require('fs').appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);

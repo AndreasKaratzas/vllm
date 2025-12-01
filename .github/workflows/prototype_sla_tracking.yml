@@ -1,0 +1,189 @@
+name: "[PROTOTYPE] SLA Tracking"
+
+# PROTOTYPE: Tracks SLA compliance for priority-labeled issues
+# Runs on schedule to check response times and flag breaches
+#
+# SLA Targets:
+# - P0-critical: 4 hours first response
+# - P1-high: 24 hours first response
+# - P2-medium: 1 week first response
+# - P3-low: No SLA
+#
+# STATUS: Ready for testing
+
+on:
+  schedule:
+    # Run every hour
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (no labels/comments added)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  check-sla:
+    name: Check SLA Compliance
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check AMD issues for SLA breaches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isDryRun = '${{ inputs.dry_run }}' === 'true' || '${{ github.event_name }}' === 'schedule';
+
+            // SLA definitions in hours
+            const slaConfig = {
+              'P0-critical': { hours: 4, label: 'sla-breach-p0' },
+              'P1-high': { hours: 24, label: 'sla-breach-p1' },
+              'P2-medium': { hours: 168, label: 'sla-breach-p2' },  // 1 week
+              // P3-low has no SLA
+            };
+
+            // Labels that indicate AMD issues
+            const amdLabels = ['rocm', 'amd', 'amd-ci'];
+
+            // Get all open issues with priority labels
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            const now = new Date();
+            const breaches = [];
+            const atRisk = [];
+
+            for (const issue of issues) {
+              // Skip PRs
+              if (issue.pull_request) continue;
+
+              const labels = issue.labels.map(l => l.name);
+
+              // Check if AMD-related
+              const isAmd = labels.some(l => amdLabels.includes(l));
+              if (!isAmd) continue;
+
+              // Find priority label
+              const priorityLabel = Object.keys(slaConfig).find(p => labels.includes(p));
+              if (!priorityLabel) continue;
+
+              const sla = slaConfig[priorityLabel];
+              const createdAt = new Date(issue.created_at);
+              const hoursOpen = (now - createdAt) / (1000 * 60 * 60);
+
+              // Check if there's been a response (comment from non-author)
+              const comments = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                per_page: 10,
+              });
+
+              const hasResponse = comments.data.some(c =>
+                c.user.login !== issue.user.login &&
+                !c.user.login.includes('[bot]')
+              );
+
+              // Skip if already responded
+              if (hasResponse) continue;
+
+              // Check for breach
+              if (hoursOpen > sla.hours) {
+                breaches.push({
+                  number: issue.number,
+                  title: issue.title,
+                  priority: priorityLabel,
+                  hoursOpen: hoursOpen.toFixed(1),
+                  slaHours: sla.hours,
+                  breachLabel: sla.label,
+                });
+              }
+              // Check if at risk (within 25% of SLA)
+              else if (hoursOpen > sla.hours * 0.75) {
+                atRisk.push({
+                  number: issue.number,
+                  title: issue.title,
+                  priority: priorityLabel,
+                  hoursOpen: hoursOpen.toFixed(1),
+                  slaHours: sla.hours,
+                  hoursRemaining: (sla.hours - hoursOpen).toFixed(1),
+                });
+              }
+            }
+
+            // Report breaches
+            core.info(`=== SLA Report ===`);
+            core.info(`Breaches: ${breaches.length}`);
+            core.info(`At Risk: ${atRisk.length}`);
+
+            if (!isDryRun) {
+              // Add breach labels and comments
+              for (const breach of breaches) {
+                const existingLabels = (await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: breach.number,
+                })).data.labels.map(l => l.name);
+
+                if (!existingLabels.includes(breach.breachLabel)) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: breach.number,
+                    labels: [breach.breachLabel],
+                  });
+
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: breach.number,
+                    body: `⚠️ **SLA Breach Alert**\n\n` +
+                          `This ${breach.priority} issue has been open for ${breach.hoursOpen} hours ` +
+                          `without a response (SLA: ${breach.slaHours} hours).\n\n` +
+                          `Please prioritize a response.`
+                  });
+                }
+              }
+            }
+
+            // Generate summary
+            let summary = '## SLA Tracking Report\n\n';
+            summary += `**Run type:** ${isDryRun ? 'Dry Run' : 'Live'}\n`;
+            summary += `**Timestamp:** ${now.toISOString()}\n\n`;
+
+            if (breaches.length > 0) {
+              summary += '### 🚨 SLA Breaches\n\n';
+              summary += '| Issue | Priority | Hours Open | SLA |\n';
+              summary += '|-------|----------|------------|-----|\n';
+              for (const b of breaches) {
+                summary += `| [#${b.number}](${context.payload.repository.html_url}/issues/${b.number}) | ${b.priority} | ${b.hoursOpen}h | ${b.slaHours}h |\n`;
+              }
+              summary += '\n';
+            }
+
+            if (atRisk.length > 0) {
+              summary += '### ⚠️ At Risk (75%+ of SLA)\n\n';
+              summary += '| Issue | Priority | Hours Open | Remaining |\n';
+              summary += '|-------|----------|------------|------------|\n';
+              for (const r of atRisk) {
+                summary += `| [#${r.number}](${context.payload.repository.html_url}/issues/${r.number}) | ${r.priority} | ${r.hoursOpen}h | ${r.hoursRemaining}h |\n`;
+              }
+            }
+
+            if (breaches.length === 0 && atRisk.length === 0) {
+              summary += '✅ All AMD issues are within SLA!\n';
+            }
+
+            require('fs').appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);

@@ -1,0 +1,176 @@
+name: "[PROTOTYPE] Duplicate Issue Detection"
+
+# PROTOTYPE: Detects potential duplicate issues using text similarity
+# Uses simple keyword matching and TF-IDF-like scoring
+#
+# STATUS: Experimental - basic keyword matching, no ML
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  detect-duplicates:
+    name: Find Similar Issues
+    runs-on: ubuntu-latest
+
+    # Only run for AMD-related issues
+    if: |
+      contains(github.event.issue.title, 'AMD') ||
+      contains(github.event.issue.title, 'ROCm') ||
+      contains(github.event.issue.title, 'rocm') ||
+      contains(github.event.issue.title, 'MI3') ||
+      contains(github.event.issue.body, 'rocm') ||
+      contains(github.event.issue.body, 'amd')
+
+    steps:
+      - name: Find similar issues
+        id: find-similar
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const newIssue = context.payload.issue;
+            const newTitle = newIssue.title.toLowerCase();
+            const newBody = (newIssue.body || '').toLowerCase();
+
+            // Extract keywords from title and body
+            function extractKeywords(text) {
+              // Remove common words and extract meaningful terms
+              const stopWords = new Set([
+                'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+                'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+                'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare',
+                'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as',
+                'into', 'through', 'during', 'before', 'after', 'above', 'below',
+                'and', 'but', 'or', 'nor', 'so', 'yet', 'both', 'either', 'neither',
+                'not', 'only', 'own', 'same', 'than', 'too', 'very', 'just',
+                'i', 'me', 'my', 'we', 'our', 'you', 'your', 'it', 'its', 'this', 'that',
+                'when', 'where', 'why', 'how', 'what', 'which', 'who', 'whom',
+                'bug', 'issue', 'error', 'problem', 'amd', 'rocm', 'vllm',
+              ]);
+
+              return text
+                .replace(/[^a-z0-9\s]/g, ' ')
+                .split(/\s+/)
+                .filter(word => word.length > 2 && !stopWords.has(word));
+            }
+
+            const newKeywords = new Set([
+              ...extractKeywords(newTitle),
+              ...extractKeywords(newBody.slice(0, 2000))  // Limit body length
+            ]);
+
+            // Get recent AMD issues (last 100)
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              labels: 'rocm',
+              per_page: 100,
+            });
+
+            const similarIssues = [];
+
+            for (const issue of issues) {
+              // Skip self and PRs
+              if (issue.number === newIssue.number) continue;
+              if (issue.pull_request) continue;
+
+              const issueTitle = issue.title.toLowerCase();
+              const issueBody = (issue.body || '').toLowerCase();
+              const issueKeywords = new Set([
+                ...extractKeywords(issueTitle),
+                ...extractKeywords(issueBody.slice(0, 2000))
+              ]);
+
+              // Calculate Jaccard similarity
+              const intersection = [...newKeywords].filter(k => issueKeywords.has(k));
+              const union = new Set([...newKeywords, ...issueKeywords]);
+              const similarity = intersection.length / union.size;
+
+              // Also check for exact phrase matches
+              const errorPatterns = [
+                /hip error[:\s]+\w+/gi,
+                /runtime error[:\s]+\w+/gi,
+                /\bsegmentation fault\b/gi,
+                /\bout of memory\b/gi,
+                /\btimeout\b/gi,
+                /\bassert(ion)? fail/gi,
+              ];
+
+              let phraseMatch = false;
+              for (const pattern of errorPatterns) {
+                const newMatches = newBody.match(pattern) || [];
+                const issueMatches = issueBody.match(pattern) || [];
+                if (newMatches.length > 0 && issueMatches.length > 0) {
+                  if (newMatches.some(m => issueMatches.includes(m))) {
+                    phraseMatch = true;
+                    break;
+                  }
+                }
+              }
+
+              // Score threshold
+              const score = similarity + (phraseMatch ? 0.2 : 0);
+              if (score > 0.25) {
+                similarIssues.push({
+                  number: issue.number,
+                  title: issue.title,
+                  state: issue.state,
+                  similarity: (score * 100).toFixed(0),
+                  sharedKeywords: intersection.slice(0, 5).join(', '),
+                  phraseMatch,
+                });
+              }
+            }
+
+            // Sort by similarity
+            similarIssues.sort((a, b) => b.similarity - a.similarity);
+
+            // Take top 5
+            const topSimilar = similarIssues.slice(0, 5);
+
+            core.setOutput('found', topSimilar.length > 0 ? 'true' : 'false');
+            core.setOutput('similar', JSON.stringify(topSimilar));
+
+            return topSimilar;
+
+      - name: Add duplicate warning comment
+        if: steps.find-similar.outputs.found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const similar = JSON.parse('${{ steps.find-similar.outputs.similar }}');
+
+            let comment = `🔍 **Potential similar issues found:**\n\n`;
+            comment += `Before continuing, please check if any of these issues match yours:\n\n`;
+
+            for (const issue of similar) {
+              const stateEmoji = issue.state === 'open' ? '🟢' : '🔴';
+              comment += `- ${stateEmoji} #${issue.number} - ${issue.title} (${issue.similarity}% similar)\n`;
+              if (issue.sharedKeywords) {
+                comment += `  _Keywords: ${issue.sharedKeywords}_\n`;
+              }
+            }
+
+            comment += `\nIf this is a duplicate, please close this issue and add your information to the existing one.\n\n`;
+            comment += `_This is an automated check. If this is not a duplicate, please proceed._`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: comment
+            });
+
+            // Add potential-duplicate label
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: ['potential-duplicate'],
+            });

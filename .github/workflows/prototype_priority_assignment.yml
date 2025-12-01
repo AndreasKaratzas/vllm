@@ -1,0 +1,190 @@
+name: "[PROTOTYPE] Automated Priority Assignment"
+
+# PROTOTYPE: Automatically assigns priority labels based on issue content
+# Detects urgency keywords and patterns to assign P0-P3 labels
+#
+# STATUS: Ready for testing - can be enabled by removing .prototype from filename
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  assign-priority:
+    name: Assign Priority Label
+    runs-on: ubuntu-latest
+
+    # Only run for AMD-related issues that don't already have a priority label
+    if: |
+      (contains(github.event.issue.labels.*.name, 'rocm') ||
+       contains(github.event.issue.labels.*.name, 'amd')) &&
+      !contains(github.event.issue.labels.*.name, 'P0-critical') &&
+      !contains(github.event.issue.labels.*.name, 'P1-high') &&
+      !contains(github.event.issue.labels.*.name, 'P2-medium') &&
+      !contains(github.event.issue.labels.*.name, 'P3-low')
+
+    steps:
+      - name: Analyze and assign priority
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const title = (issue.title || '').toLowerCase();
+            const body = (issue.body || '').toLowerCase();
+            const text = `${title}\n${body}`;
+            const labels = issue.labels.map(l => l.name);
+
+            // Priority detection rules
+            const priorityRules = {
+              'P0-critical': {
+                // Immediate attention required
+                titlePatterns: [
+                  /\bcritical\b/i,
+                  /\burgent\b/i,
+                  /\bemergency\b/i,
+                  /\bsev[- ]?0\b/i,
+                  /\bhotfix\b/i,
+                ],
+                bodyPatterns: [
+                  /blocks?\s+(all|every|main)/i,
+                  /completely\s+broken/i,
+                  /cannot\s+use\s+vllm/i,
+                  /production\s+(down|broken|blocked)/i,
+                  /data\s+loss/i,
+                  /security\s+(vuln|issue|bug)/i,
+                ],
+                labelTriggers: ['rocm-blocker', 'security', 'release-blocker'],
+                dropdownValues: ['Blocking - Cannot use vLLM at all', 'Critical'],
+              },
+              'P1-high': {
+                // Should be addressed soon
+                titlePatterns: [
+                  /\bblocking\b/i,
+                  /\bblocker\b/i,
+                  /\bregression\b/i,
+                  /\bsev[- ]?1\b/i,
+                ],
+                bodyPatterns: [
+                  /blocks?\s+(release|deployment|work)/i,
+                  /no\s+workaround/i,
+                  /affects?\s+(many|multiple|all)\s+users/i,
+                  /significant\s+(impact|regression)/i,
+                  /previously\s+work(ed|ing)/i,
+                ],
+                labelTriggers: ['regression', 'breaking-change'],
+                dropdownValues: ['High - Have workaround but painful', 'High'],
+              },
+              'P2-medium': {
+                // Should be fixed but not urgent
+                titlePatterns: [
+                  /\bbug\b/i,
+                  /\bissue\b/i,
+                  /\bproblem\b/i,
+                ],
+                bodyPatterns: [
+                  /workaround\s+(exists?|available|found)/i,
+                  /sometimes\s+(fails?|works?)/i,
+                  /inconsistent/i,
+                  /minor\s+(issue|bug|problem)/i,
+                ],
+                labelTriggers: ['has-workaround'],
+                dropdownValues: ['Medium - Annoying but manageable', 'Medium'],
+              },
+              'P3-low': {
+                // Nice to have
+                titlePatterns: [
+                  /\benhancement\b/i,
+                  /\bfeature\b/i,
+                  /\bimprovement\b/i,
+                  /\bnice\s+to\s+have\b/i,
+                ],
+                bodyPatterns: [
+                  /would\s+be\s+nice/i,
+                  /future\s+(improvement|enhancement)/i,
+                  /not\s+urgent/i,
+                  /low\s+priority/i,
+                  /when\s+you\s+have\s+time/i,
+                ],
+                labelTriggers: ['enhancement', 'documentation'],
+                dropdownValues: ['Low - Minor issue', 'Low - Future improvement'],
+              },
+            };
+
+            let assignedPriority = null;
+            let reason = '';
+
+            // Check each priority level (highest first)
+            for (const [priority, rules] of Object.entries(priorityRules)) {
+              // Check title patterns
+              for (const pattern of rules.titlePatterns) {
+                if (pattern.test(title)) {
+                  assignedPriority = priority;
+                  reason = `Title matches pattern: ${pattern}`;
+                  break;
+                }
+              }
+              if (assignedPriority) break;
+
+              // Check body patterns
+              for (const pattern of rules.bodyPatterns) {
+                if (pattern.test(body)) {
+                  assignedPriority = priority;
+                  reason = `Body matches pattern: ${pattern}`;
+                  break;
+                }
+              }
+              if (assignedPriority) break;
+
+              // Check label triggers
+              for (const triggerLabel of rules.labelTriggers) {
+                if (labels.includes(triggerLabel)) {
+                  assignedPriority = priority;
+                  reason = `Has label: ${triggerLabel}`;
+                  break;
+                }
+              }
+              if (assignedPriority) break;
+
+              // Check dropdown values (from issue templates)
+              for (const dropdownValue of rules.dropdownValues) {
+                if (body.includes(dropdownValue.toLowerCase())) {
+                  assignedPriority = priority;
+                  reason = `Dropdown selection: ${dropdownValue}`;
+                  break;
+                }
+              }
+              if (assignedPriority) break;
+            }
+
+            // Default to P2-medium if no priority detected but has bug-like characteristics
+            if (!assignedPriority && labels.includes('bug')) {
+              assignedPriority = 'P2-medium';
+              reason = 'Default for bug issues';
+            }
+
+            if (assignedPriority) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: [assignedPriority],
+              });
+
+              core.info(`Assigned ${assignedPriority} - ${reason}`);
+
+              // Add a comment explaining the priority assignment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `📊 **Auto-assigned priority: ${assignedPriority}**\n\n` +
+                      `Reason: ${reason}\n\n` +
+                      `_If this priority is incorrect, please update it manually._`
+              });
+            } else {
+              core.info('No priority could be determined automatically');
+            }
