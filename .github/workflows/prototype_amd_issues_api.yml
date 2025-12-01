@@ -1,0 +1,473 @@
+# =============================================================================
+# AMD Issues API - Unified Self-Hosted Server Integration
+# =============================================================================
+# This workflow calls a single self-hosted server for all AI/ML operations:
+# - Priority assignment
+# - SLA tracking
+# - Duplicate detection
+# - Label suggestion
+#
+# Benefits:
+# - No per-request LLM API costs (use fine-tuned Qwen 8B, Llama, etc.)
+# - Single token authentication (prevents abuse/DDoS)
+# - Private issue database for duplicate detection with embeddings
+# - Full control over data and model deployment
+# =============================================================================
+
+name: "[PROTOTYPE] AMD Issues API"
+
+on:
+  issues:
+    types: [opened, edited, labeled]
+
+  # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to analyze'
+        required: true
+        type: number
+      actions:
+        description: 'Actions to perform (comma-separated)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - priority
+          - duplicates
+          - labels
+          - sla
+      dry_run:
+        description: 'Dry run (no changes applied)'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  # ===========================================
+  # CONFIGURATION - Update these values
+  # ===========================================
+
+  # Your self-hosted AMD Issues API server
+  AMD_ISSUES_API_URL: 'https://your-server.example.com/api/v1'
+
+  # Request timeout in milliseconds
+  API_TIMEOUT: 30000
+
+  # Retry configuration
+  MAX_RETRIES: 3
+  RETRY_DELAY_MS: 1000
+
+jobs:
+  analyze-issue:
+    name: Analyze Issue
+    runs-on: ubuntu-latest
+
+    # Only run for AMD-related issues
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.issue.title, 'AMD') ||
+      contains(github.event.issue.title, 'ROCm') ||
+      contains(github.event.issue.title, 'MI300') ||
+      contains(github.event.issue.title, 'MI325') ||
+      contains(github.event.issue.body || '', 'rocm') ||
+      contains(github.event.issue.body || '', 'amd') ||
+      contains(join(github.event.issue.labels.*.name, ','), 'amd') ||
+      contains(join(github.event.issue.labels.*.name, ','), 'rocm')
+
+    outputs:
+      priority: ${{ steps.api-call.outputs.priority }}
+      duplicates: ${{ steps.api-call.outputs.duplicates }}
+      labels: ${{ steps.api-call.outputs.labels }}
+      sla_status: ${{ steps.api-call.outputs.sla_status }}
+
+    steps:
+      - name: Get Issue Data
+        id: issue-data
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let issue;
+
+            if (context.eventName === 'workflow_dispatch') {
+              const { data } = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number || 0 }}
+              });
+              issue = data;
+            } else {
+              issue = context.payload.issue;
+            }
+
+            // Get issue comments for context
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              per_page: 10
+            });
+
+            const issueData = {
+              number: issue.number,
+              title: issue.title,
+              body: issue.body || '',
+              labels: issue.labels.map(l => l.name),
+              state: issue.state,
+              created_at: issue.created_at,
+              updated_at: issue.updated_at,
+              author: issue.user.login,
+              comments_count: issue.comments,
+              recent_comments: comments.map(c => ({
+                author: c.user.login,
+                body: c.body.substring(0, 500),
+                created_at: c.created_at
+              })),
+              url: issue.html_url
+            };
+
+            core.setOutput('issue_json', JSON.stringify(issueData));
+            core.setOutput('issue_number', issue.number);
+            return issueData;
+
+      - name: Call AMD Issues API
+        id: api-call
+        uses: actions/github-script@v7
+        env:
+          API_TOKEN: ${{ secrets.AMD_ISSUES_API_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          ACTIONS: ${{ inputs.actions || 'all' }}
+        with:
+          script: |
+            const issueData = JSON.parse('${{ steps.issue-data.outputs.issue_json }}'.replace(/'/g, "\\'"));
+            const apiUrl = process.env.AMD_ISSUES_API_URL || '${{ env.AMD_ISSUES_API_URL }}';
+            const apiToken = process.env.API_TOKEN;
+            const dryRun = process.env.DRY_RUN === 'true';
+            const actionsToRun = process.env.ACTIONS;
+
+            if (!apiToken) {
+              core.setFailed('AMD_ISSUES_API_TOKEN secret is not configured');
+              return;
+            }
+
+            // Determine which actions to run
+            const allActions = ['priority', 'duplicates', 'labels', 'sla'];
+            const actions = actionsToRun === 'all' ? allActions : actionsToRun.split(',').map(a => a.trim());
+
+            console.log(`🔍 Analyzing issue #${issueData.number}: ${issueData.title}`);
+            console.log(`📋 Actions to perform: ${actions.join(', ')}`);
+            console.log(`🧪 Dry run: ${dryRun}`);
+
+            // Helper function for API calls with retry
+            async function callApi(endpoint, payload, retries = 3) {
+              for (let attempt = 1; attempt <= retries; attempt++) {
+                try {
+                  const response = await fetch(`${apiUrl}${endpoint}`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${apiToken}`,
+                      'X-GitHub-Repository': `${context.repo.owner}/${context.repo.repo}`,
+                      'X-Request-ID': `${context.runId}-${Date.now()}`,
+                      'X-Dry-Run': dryRun.toString()
+                    },
+                    body: JSON.stringify(payload),
+                    signal: AbortSignal.timeout(${{ env.API_TIMEOUT }})
+                  });
+
+                  if (response.status === 429) {
+                    // Rate limited - wait and retry
+                    const retryAfter = response.headers.get('Retry-After') || 5;
+                    console.log(`⏳ Rate limited, waiting ${retryAfter}s...`);
+                    await new Promise(r => setTimeout(r, retryAfter * 1000));
+                    continue;
+                  }
+
+                  if (!response.ok) {
+                    const error = await response.text();
+                    throw new Error(`API error ${response.status}: ${error}`);
+                  }
+
+                  return await response.json();
+                } catch (error) {
+                  if (attempt === retries) throw error;
+                  console.log(`⚠️ Attempt ${attempt} failed, retrying...`);
+                  await new Promise(r => setTimeout(r, ${{ env.RETRY_DELAY_MS }} * attempt));
+                }
+              }
+            }
+
+            const results = {
+              priority: null,
+              duplicates: null,
+              labels: null,
+              sla: null
+            };
+
+            // Call the unified analyze endpoint
+            try {
+              const response = await callApi('/analyze', {
+                issue: issueData,
+                actions: actions,
+                context: {
+                  repository: `${context.repo.owner}/${context.repo.repo}`,
+                  event: context.eventName,
+                  dry_run: dryRun
+                }
+              });
+
+              console.log('✅ API Response received');
+
+              // Process results
+              if (response.priority) {
+                results.priority = response.priority;
+                console.log(`📊 Priority: ${response.priority.level} (confidence: ${response.priority.confidence})`);
+                console.log(`   Reason: ${response.priority.reason}`);
+                core.setOutput('priority', JSON.stringify(response.priority));
+              }
+
+              if (response.duplicates) {
+                results.duplicates = response.duplicates;
+                console.log(`🔄 Duplicates found: ${response.duplicates.matches?.length || 0}`);
+                response.duplicates.matches?.forEach(d => {
+                  console.log(`   - #${d.issue_number}: ${d.similarity}% match`);
+                });
+                core.setOutput('duplicates', JSON.stringify(response.duplicates));
+              }
+
+              if (response.labels) {
+                results.labels = response.labels;
+                console.log(`🏷️ Suggested labels: ${response.labels.suggestions?.join(', ') || 'none'}`);
+                core.setOutput('labels', JSON.stringify(response.labels));
+              }
+
+              if (response.sla) {
+                results.sla = response.sla;
+                console.log(`⏱️ SLA Status: ${response.sla.status}`);
+                if (response.sla.time_remaining) {
+                  console.log(`   Time remaining: ${response.sla.time_remaining}`);
+                }
+                core.setOutput('sla_status', JSON.stringify(response.sla));
+              }
+
+              return results;
+
+            } catch (error) {
+              core.warning(`API call failed: ${error.message}`);
+              console.log('⚠️ Falling back to local processing or skipping...');
+              return results;
+            }
+
+      - name: Apply Priority Label
+        if: steps.api-call.outputs.priority && inputs.dry_run != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const priority = JSON.parse('${{ steps.api-call.outputs.priority }}');
+            const issueNumber = ${{ steps.issue-data.outputs.issue_number }};
+
+            if (!priority.level) return;
+
+            // Remove existing priority labels
+            const priorityLabels = ['P0', 'P1', 'P2', 'P3'];
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber
+            });
+
+            const currentLabels = issue.labels.map(l => l.name);
+            const labelsToRemove = currentLabels.filter(l => priorityLabels.includes(l));
+
+            for (const label of labelsToRemove) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name: label
+                });
+              } catch (e) { /* ignore */ }
+            }
+
+            // Add new priority label
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: [priority.level]
+            });
+
+            console.log(`✅ Applied priority label: ${priority.level}`);
+
+      - name: Handle Duplicates
+        if: steps.api-call.outputs.duplicates && inputs.dry_run != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const duplicates = JSON.parse('${{ steps.api-call.outputs.duplicates }}');
+            const issueNumber = ${{ steps.issue-data.outputs.issue_number }};
+
+            if (!duplicates.matches || duplicates.matches.length === 0) return;
+
+            // Filter high-confidence matches (>70% similarity)
+            const highConfidence = duplicates.matches.filter(d => d.similarity >= 70);
+
+            if (highConfidence.length === 0) return;
+
+            let comment = '### 🔍 Potential Duplicate Issues Detected\n\n';
+            comment += 'This issue may be related to:\n\n';
+
+            for (const dup of highConfidence.slice(0, 5)) {
+              comment += `- #${dup.issue_number} (${dup.similarity}% similar)`;
+              if (dup.title) comment += `: ${dup.title}`;
+              comment += '\n';
+            }
+
+            comment += '\nPlease check if your issue has already been reported.\n';
+            comment += '\n<sub>🤖 Detected by AMD Issues API</sub>';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: comment
+            });
+
+            // Add potential-duplicate label if very high similarity
+            if (highConfidence.some(d => d.similarity >= 85)) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: ['potential-duplicate']
+              });
+            }
+
+      - name: Apply Suggested Labels
+        if: steps.api-call.outputs.labels && inputs.dry_run != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labelResult = JSON.parse('${{ steps.api-call.outputs.labels }}');
+            const issueNumber = ${{ steps.issue-data.outputs.issue_number }};
+
+            if (!labelResult.suggestions || labelResult.suggestions.length === 0) return;
+
+            // Get current labels
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber
+            });
+
+            const currentLabels = new Set(issue.labels.map(l => l.name));
+            const newLabels = labelResult.suggestions.filter(l => !currentLabels.has(l));
+
+            if (newLabels.length === 0) return;
+
+            // Apply new labels
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: newLabels
+            });
+
+            console.log(`✅ Applied labels: ${newLabels.join(', ')}`);
+
+            // Optionally add comment explaining labels
+            if (labelResult.explanations) {
+              let comment = '### 🏷️ Labels Applied\n\n';
+              for (const label of newLabels) {
+                const explanation = labelResult.explanations[label];
+                if (explanation) {
+                  comment += `- **${label}**: ${explanation}\n`;
+                }
+              }
+              comment += '\n<sub>🤖 Suggested by AMD Issues API</sub>';
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: comment
+              });
+            }
+
+      - name: Report SLA Status
+        if: steps.api-call.outputs.sla_status && inputs.dry_run != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sla = JSON.parse('${{ steps.api-call.outputs.sla_status }}');
+            const issueNumber = ${{ steps.issue-data.outputs.issue_number }};
+
+            // Only act on SLA breaches or at-risk issues
+            if (sla.status !== 'breach' && sla.status !== 'at_risk') return;
+
+            const label = sla.status === 'breach' ? 'sla-breach' : 'sla-at-risk';
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: [label]
+            });
+
+            if (sla.status === 'breach') {
+              console.log(`⚠️ SLA BREACH: Issue #${issueNumber} has exceeded response time SLA`);
+            }
+
+      - name: Generate Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = ${{ steps.issue-data.outputs.issue_number }};
+            const dryRun = '${{ inputs.dry_run }}' === 'true';
+
+            let summary = `## AMD Issues API Analysis - Issue #${issueNumber}\n\n`;
+
+            if (dryRun) {
+              summary += '> ⚠️ **DRY RUN** - No changes were applied\n\n';
+            }
+
+            const priority = '${{ steps.api-call.outputs.priority }}';
+            const duplicates = '${{ steps.api-call.outputs.duplicates }}';
+            const labels = '${{ steps.api-call.outputs.labels }}';
+            const sla = '${{ steps.api-call.outputs.sla_status }}';
+
+            if (priority) {
+              const p = JSON.parse(priority);
+              summary += `### Priority\n- **Level**: ${p.level}\n- **Confidence**: ${p.confidence}%\n- **Reason**: ${p.reason}\n\n`;
+            }
+
+            if (duplicates) {
+              const d = JSON.parse(duplicates);
+              summary += `### Duplicates\n`;
+              if (d.matches?.length) {
+                d.matches.forEach(m => {
+                  summary += `- #${m.issue_number}: ${m.similarity}% similar\n`;
+                });
+              } else {
+                summary += '- No duplicates found\n';
+              }
+              summary += '\n';
+            }
+
+            if (labels) {
+              const l = JSON.parse(labels);
+              summary += `### Suggested Labels\n`;
+              summary += l.suggestions?.length ? l.suggestions.map(s => `- ${s}`).join('\n') : '- None';
+              summary += '\n\n';
+            }
+
+            if (sla) {
+              const s = JSON.parse(sla);
+              summary += `### SLA Status\n- **Status**: ${s.status}\n`;
+              if (s.time_remaining) summary += `- **Time Remaining**: ${s.time_remaining}\n`;
+              summary += '\n';
+            }
+
+            await core.summary.addRaw(summary).write();

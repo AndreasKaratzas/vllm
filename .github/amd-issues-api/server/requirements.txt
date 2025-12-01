@@ -1,0 +1,29 @@
+# AMD Issues API Server Dependencies
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+
+# Rate limiting
+slowapi>=0.1.9
+
+# HTTP client (for GitHub API)
+httpx>=0.26.0
+
+# Vector database clients (choose one)
+qdrant-client>=1.7.0
+# chromadb>=0.4.0
+# pymilvus>=2.3.0
+
+# Embedding models
+sentence-transformers>=2.3.0
+
+# LLM inference (choose based on your setup)
+# vllm>=0.3.0              # For GPU inference with vLLM
+# ollama>=0.1.0            # For Ollama integration
+# transformers>=4.37.0     # For Hugging Face models
+# llama-cpp-python>=0.2.0  # For CPU inference with llama.cpp
+
+# Utilities
+python-dotenv>=1.0.0

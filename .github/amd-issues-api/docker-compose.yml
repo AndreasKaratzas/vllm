@@ -1,0 +1,94 @@
+# AMD Issues API - Docker Compose Deployment
+#
+# Usage:
+#   1. Create .env file with your configuration
+#   2. docker compose up -d
+#
+# For GPU support (vLLM):
+#   docker compose --profile gpu up -d
+
+services:
+  # ==========================================================================
+  # AMD Issues API Server
+  # ==========================================================================
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - AMD_API_TOKEN=${AMD_API_TOKEN}
+      - MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-7B-Instruct}
+      - QDRANT_URL=http://qdrant:6333
+      - RATE_LIMIT_RPM=${RATE_LIMIT_RPM:-100}
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==========================================================================
+  # Qdrant Vector Database
+  # ==========================================================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Ollama for Local LLM (optional, CPU/GPU)
+  # ==========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # For GPU support, uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ==========================================================================
+  # vLLM for High-Performance GPU Inference (optional)
+  # ==========================================================================
+  vllm:
+    image: vllm/vllm-openai:latest
+    profiles: ["gpu"]
+    ports:
+      - "8080:8000"
+    environment:
+      - MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-7B-Instruct}
+    volumes:
+      - model_cache:/root/.cache/huggingface
+    command: >
+      --model ${MODEL_NAME:-Qwen/Qwen2.5-7B-Instruct}
+      --trust-remote-code
+      --max-model-len 4096
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  ollama_data:
+  model_cache:
