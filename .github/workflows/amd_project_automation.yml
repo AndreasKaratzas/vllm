@@ -1,70 +1,174 @@
-name: AMD Project Assignment
+name: AMD Project Automation
 
-# Automatically assigns AMD-related issues to the correct project:
-# - Issues with 'amd-ci' label → AMD CI project (#39)
-# - Issues with 'amd' label (but NOT 'amd-ci') → AMD project (#38)
+# Automatically adds ROCm-labeled issues/PRs to AMD projects
+# and logs intended status based on labels
+#
+# Project Routing:
+# - 'amd-ci' label → AMD CI project (#39)
+# - 'amd' label (without 'amd-ci') → AMD project (#38)
+# - Any ROCm-related labels without 'amd'/'amd-ci' → AMD project (#38)
+#
+# ============================================================================
+# TOKEN SETUP: This workflow requires the PROJECT_TOKEN secret
+# with 'project' scope for organization project access
+# ============================================================================
 
 on:
   issues:
-    types: [opened, labeled]
+    types: [opened, labeled, unlabeled, closed, reopened]
+  pull_request_target:
+    types: [opened, labeled, unlabeled, closed, reopened]
 
 permissions:
   issues: read
+  pull-requests: read
   repository-projects: write
 
 env:
-  # Project numbers - update these if project IDs change
   AMD_PROJECT_NUMBER: 38
   AMD_CI_PROJECT_NUMBER: 39
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  assign-to-project:
+  add-to-project:
+    name: Add to AMD Project
     runs-on: ubuntu-latest
+
+    # Only run for AMD-related labels
+    if: |
+      contains(github.event.issue.labels.*.name, 'rocm') ||
+      contains(github.event.issue.labels.*.name, 'amd') ||
+      contains(github.event.issue.labels.*.name, 'amd-ci') ||
+      contains(github.event.issue.labels.*.name, 'mi300x') ||
+      contains(github.event.issue.labels.*.name, 'mi325x') ||
+      contains(github.event.issue.labels.*.name, 'mi350-series') ||
+      contains(github.event.issue.labels.*.name, 'aiter-backend') ||
+      contains(github.event.issue.labels.*.name, 'rccl') ||
+      contains(github.event.issue.labels.*.name, 'rocm-blocker') ||
+      contains(github.event.issue.labels.*.name, 'rocm-6.x') ||
+      contains(github.event.issue.labels.*.name, 'rocm-7.x') ||
+      contains(github.event.pull_request.labels.*.name, 'rocm') ||
+      contains(github.event.pull_request.labels.*.name, 'amd') ||
+      contains(github.event.pull_request.labels.*.name, 'amd-ci') ||
+      contains(github.event.pull_request.labels.*.name, 'mi300x') ||
+      contains(github.event.pull_request.labels.*.name, 'mi325x') ||
+      contains(github.event.pull_request.labels.*.name, 'aiter-backend') ||
+      contains(github.event.pull_request.labels.*.name, 'rocm-blocker')
+
     steps:
-      - name: Get issue labels
-        id: labels
+      - name: Determine project assignment
+        id: check
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
         with:
           script: |
-            const labels = context.payload.issue.labels.map(l => l.name);
+            const item = context.payload.issue || context.payload.pull_request;
+            if (!item) {
+              core.setOutput('should_assign', 'false');
+              return;
+            }
+
+            const labels = item.labels.map(l => l.name);
             const hasAmdCi = labels.includes('amd-ci');
             const hasAmd = labels.includes('amd');
+            const hasRocm = labels.includes('rocm');
 
-            core.setOutput('has_amd_ci', hasAmdCi);
-            core.setOutput('has_amd', hasAmd);
+            // Check for any AMD-related label
+            const amdRelatedLabels = [
+              'rocm', 'amd', 'amd-ci', 'mi300x', 'mi325x', 'mi350-series',
+              'aiter-backend', 'rccl', 'rocm-blocker', 'rocm-6.x', 'rocm-7.x'
+            ];
+            const hasAmdRelated = labels.some(l => amdRelatedLabels.includes(l));
+
+            core.setOutput('has_amd_ci', hasAmdCi.toString());
+            core.setOutput('has_amd', hasAmd.toString());
+            core.setOutput('has_rocm', hasRocm.toString());
+            core.setOutput('has_amd_related', hasAmdRelated.toString());
+            core.setOutput('should_assign', hasAmdRelated.toString());
             core.setOutput('labels', JSON.stringify(labels));
+            core.setOutput('item_number', item.number.toString());
+            core.setOutput('item_title', item.title);
+            core.setOutput('item_state', item.state);
+            core.setOutput('is_pr', (!!context.payload.pull_request).toString());
 
-            core.notice(`Issue #${context.issue.number} labels: ${labels.join(', ')}`);
-            core.notice(`Has 'amd-ci': ${hasAmdCi}, Has 'amd': ${hasAmd}`);
+            core.info(`Item #${item.number}: ${item.title}`);
+            core.info(`Labels: ${labels.join(', ')}`);
+            core.info(`AMD-CI: ${hasAmdCi}, AMD: ${hasAmd}, ROCm: ${hasRocm}`);
 
       # Assign to AMD CI project (#39) if has amd-ci label
       - name: Add to AMD CI project
-        if: steps.labels.outputs.has_amd_ci == 'true'
+        if: steps.check.outputs.has_amd_ci == 'true'
         uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e  # v1.0.2
         with:
           project-url: https://github.com/orgs/vllm-project/projects/${{ env.AMD_CI_PROJECT_NUMBER }}
           github-token: ${{ secrets.PROJECT_TOKEN }}
 
-      # Assign to AMD project (#38) if has amd label but NOT amd-ci label
+      # Assign to AMD project (#38) if has AMD-related labels but NOT amd-ci
       - name: Add to AMD project
-        if: steps.labels.outputs.has_amd == 'true' && steps.labels.outputs.has_amd_ci != 'true'
+        if: steps.check.outputs.has_amd_related == 'true' && steps.check.outputs.has_amd_ci != 'true'
         uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e  # v1.0.2
         with:
           project-url: https://github.com/orgs/vllm-project/projects/${{ env.AMD_PROJECT_NUMBER }}
           github-token: ${{ secrets.PROJECT_TOKEN }}
 
-      - name: Log assignment result
+      - name: Determine target status
+        id: status
+        if: steps.check.outputs.should_assign == 'true'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
         with:
           script: |
-            const hasAmdCi = '${{ steps.labels.outputs.has_amd_ci }}' === 'true';
-            const hasAmd = '${{ steps.labels.outputs.has_amd }}' === 'true';
+            const labels = JSON.parse('${{ steps.check.outputs.labels }}');
+            const isClosed = '${{ steps.check.outputs.item_state }}' === 'closed';
+            const isPR = '${{ steps.check.outputs.is_pr }}' === 'true';
 
-            if (hasAmdCi) {
-              core.notice(`Issue #${context.issue.number} assigned to AMD CI project (#${{ env.AMD_CI_PROJECT_NUMBER }})`);
-            } else if (hasAmd) {
-              core.notice(`Issue #${context.issue.number} assigned to AMD project (#${{ env.AMD_PROJECT_NUMBER }})`);
-            } else {
-              core.notice(`Issue #${context.issue.number} not assigned to any AMD project (no amd or amd-ci labels)`);
+            // =================================================================
+            // STATUS MAPPING LOGIC
+            // Maps labels/states to project board columns:
+            // [Backlog] [Ready] [In progress] [In review] [Done]
+            // =================================================================
+            let targetStatus = 'Backlog';
+
+            // Closed items go to Done
+            if (isClosed) {
+              targetStatus = 'Done';
             }
+            // PR ready for review
+            else if (labels.includes('pr-ready') || labels.includes('ready')) {
+              targetStatus = 'In review';
+            }
+            // Actively being worked on
+            else if (labels.includes('in-progress') || labels.includes('investigating')) {
+              targetStatus = 'In progress';
+            }
+            // Critical issues go straight to Ready for immediate attention
+            else if (labels.includes('P0-critical') || labels.includes('rocm-blocker')) {
+              targetStatus = 'Ready';
+            }
+            // P1 issues also go to Ready
+            else if (labels.includes('P1-high')) {
+              targetStatus = 'Ready';
+            }
+            // Needs triage goes to Ready
+            else if (labels.includes('needs-triage')) {
+              targetStatus = 'Ready';
+            }
+            // Everything else stays in Backlog
+
+            core.setOutput('target_status', targetStatus);
+            core.info(`Target Status: ${targetStatus}`);
+
+      - name: Summary
+        if: steps.check.outputs.should_assign == 'true'
+        run: |
+          echo "## AMD Project Assignment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Item:** #${{ steps.check.outputs.item_number }} - ${{ steps.check.outputs.item_title }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Type:** ${{ steps.check.outputs.is_pr == 'true' && 'Pull Request' || 'Issue' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**State:** ${{ steps.check.outputs.item_state }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check.outputs.has_amd_ci }}" == "true" ]; then
+            echo "**Assigned to:** AMD CI Project (#${{ env.AMD_CI_PROJECT_NUMBER }})" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Assigned to:** AMD Project (#${{ env.AMD_PROJECT_NUMBER }})" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "**Suggested Status:** ${{ steps.status.outputs.target_status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Note: Status column updates require GraphQL API integration._" >> $GITHUB_STEP_SUMMARY
