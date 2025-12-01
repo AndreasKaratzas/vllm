@@ -1,0 +1,10 @@
+name: "[AMD] CI failure report"
+description: Report a failing test in AMD CI pipeline
+title: "[AMD CI Failure]: "
+labels: ["ci-failure", "rocm", "amd-ci", "needs-triage"]
+
+body:
+  # Template content to be added
+  - type: markdown
+    attributes:
+      value: "AMD CI Failure Report - Content to be configured"

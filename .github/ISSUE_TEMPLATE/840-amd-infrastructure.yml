@@ -1,0 +1,10 @@
+name: "[AMD] Infrastructure"
+description: Report AMD CI/build infrastructure issues
+title: "[AMD Infra]: "
+labels: ["infrastructure", "rocm", "amd", "needs-triage"]
+
+body:
+  # Template content to be added
+  - type: markdown
+    attributes:
+      value: "AMD Infrastructure Issue - Content to be configured"

@@ -1,0 +1,10 @@
+name: "[AMD] Bug report"
+description: Report a bug specific to AMD/ROCm platform
+title: "[AMD Bug]: "
+labels: ["bug", "rocm", "amd", "needs-triage"]
+
+body:
+  # Template content to be added
+  - type: markdown
+    attributes:
+      value: "AMD ROCm Bug Report - Content to be configured"

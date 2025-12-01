@@ -1,0 +1,10 @@
+name: "[AMD] Documentation"
+description: Report documentation issues for AMD/ROCm
+title: "[AMD Docs]: "
+labels: ["documentation", "rocm", "amd", "needs-triage"]
+
+body:
+  # Template content to be added
+  - type: markdown
+    attributes:
+      value: "AMD Documentation Issue - Content to be configured"

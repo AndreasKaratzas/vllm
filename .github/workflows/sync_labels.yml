@@ -1,0 +1,32 @@
+name: Sync Labels
+
+# Syncs labels from .github/labels.yml to the repository
+# Run manually or on push to labels.yml
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/labels.yml'
+
+permissions:
+  issues: write
+
+jobs:
+  sync-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Sync labels
+        uses: EndBug/label-sync@52074158190acb45f3571c2a8b92bb5e4b3b98c6  # v2.3.3
+        with:
+          config-file: .github/labels.yml
+          # Don't delete labels not in config (preserves existing labels)
+          delete-other-labels: false
+          # Create labels that don't exist
+          # Update existing labels if description/color changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

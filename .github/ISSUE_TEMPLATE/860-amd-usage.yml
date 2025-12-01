@@ -1,0 +1,10 @@
+name: "[AMD] Usage question"
+description: Ask questions about using vLLM on AMD/ROCm
+title: "[AMD Usage]: "
+labels: ["rocm", "amd", "needs-triage"]
+
+body:
+  # Template content to be added
+  - type: markdown
+    attributes:
+      value: "AMD Usage Question - Content to be configured"

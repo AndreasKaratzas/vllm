@@ -1,0 +1,10 @@
+name: "[AMD] Feature request"
+description: Request a new feature for AMD/ROCm platform
+title: "[AMD Feature]: "
+labels: ["enhancement", "rocm", "amd", "needs-triage"]
+
+body:
+  # Template content to be added
+  - type: markdown
+    attributes:
+      value: "AMD Feature Request - Content to be configured"

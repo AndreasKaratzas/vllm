@@ -300,16 +300,36 @@ jobs:
             }
             // Process all configured labels
             const labelsAddedResults = await Promise.all(
-              Object.entries(labelConfig).map(([labelName, config]) => 
+              Object.entries(labelConfig).map(([labelName, config]) =>
                 processLabel(labelName, config).then(added => ({ labelName, added }))
               )
             );
-            
+
             const numLabelsAdded = labelsAddedResults.filter(r => r.added).length;
             core.notice(`Processing complete. ${numLabelsAdded} label(s) added.`);
-            
+
             // Return which labels were added for the next step
             const addedLabels = labelsAddedResults.filter(r => r.added).map(r => r.labelName);
+
+            // If rocm label was added, also add 'amd' label for project routing
+            // (unless 'amd-ci' is already present - CI issues go to different project)
+            const existingLabels = context.payload.issue.labels.map(l => l.name);
+            if (addedLabels.includes('rocm') || existingLabels.includes('rocm')) {
+              const hasAmdCi = existingLabels.includes('amd-ci');
+              const hasAmd = existingLabels.includes('amd');
+
+              if (!hasAmd && !hasAmdCi) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  labels: ['amd'],
+                });
+                addedLabels.push('amd');
+                core.notice('Added "amd" label for project routing (rocm detected)');
+              }
+            }
+
             core.setOutput('labels_added', JSON.stringify(addedLabels));
             return addedLabels;
 

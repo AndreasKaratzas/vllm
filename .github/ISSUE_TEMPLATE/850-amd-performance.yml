@@ -1,0 +1,10 @@
+name: "[AMD] Performance"
+description: Report performance issues or improvements for AMD/ROCm
+title: "[AMD Performance]: "
+labels: ["performance", "rocm", "amd", "needs-triage"]
+
+body:
+  # Template content to be added
+  - type: markdown
+    attributes:
+      value: "AMD Performance Issue - Content to be configured"

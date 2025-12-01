@@ -1,0 +1,70 @@
+name: AMD Project Assignment
+
+# Automatically assigns AMD-related issues to the correct project:
+# - Issues with 'amd-ci' label → AMD CI project (#39)
+# - Issues with 'amd' label (but NOT 'amd-ci') → AMD project (#38)
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  issues: read
+  repository-projects: write
+
+env:
+  # Project numbers - update these if project IDs change
+  AMD_PROJECT_NUMBER: 38
+  AMD_CI_PROJECT_NUMBER: 39
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  assign-to-project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get issue labels
+        id: labels
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        with:
+          script: |
+            const labels = context.payload.issue.labels.map(l => l.name);
+            const hasAmdCi = labels.includes('amd-ci');
+            const hasAmd = labels.includes('amd');
+
+            core.setOutput('has_amd_ci', hasAmdCi);
+            core.setOutput('has_amd', hasAmd);
+            core.setOutput('labels', JSON.stringify(labels));
+
+            core.notice(`Issue #${context.issue.number} labels: ${labels.join(', ')}`);
+            core.notice(`Has 'amd-ci': ${hasAmdCi}, Has 'amd': ${hasAmd}`);
+
+      # Assign to AMD CI project (#39) if has amd-ci label
+      - name: Add to AMD CI project
+        if: steps.labels.outputs.has_amd_ci == 'true'
+        uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e  # v1.0.2
+        with:
+          project-url: https://github.com/orgs/vllm-project/projects/${{ env.AMD_CI_PROJECT_NUMBER }}
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+
+      # Assign to AMD project (#38) if has amd label but NOT amd-ci label
+      - name: Add to AMD project
+        if: steps.labels.outputs.has_amd == 'true' && steps.labels.outputs.has_amd_ci != 'true'
+        uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e  # v1.0.2
+        with:
+          project-url: https://github.com/orgs/vllm-project/projects/${{ env.AMD_PROJECT_NUMBER }}
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+
+      - name: Log assignment result
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        with:
+          script: |
+            const hasAmdCi = '${{ steps.labels.outputs.has_amd_ci }}' === 'true';
+            const hasAmd = '${{ steps.labels.outputs.has_amd }}' === 'true';
+
+            if (hasAmdCi) {
+              core.notice(`Issue #${context.issue.number} assigned to AMD CI project (#${{ env.AMD_CI_PROJECT_NUMBER }})`);
+            } else if (hasAmd) {
+              core.notice(`Issue #${context.issue.number} assigned to AMD project (#${{ env.AMD_PROJECT_NUMBER }})`);
+            } else {
+              core.notice(`Issue #${context.issue.number} not assigned to any AMD project (no amd or amd-ci labels)`);
+            }
