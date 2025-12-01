@@ -1,0 +1,67 @@
+name: "[AMD] CI Failure Report"
+description: Report a failing test in AMD CI pipeline
+title: "[AMD CI Failure]: "
+labels: ["ci-failure", "rocm", "amd-ci", "needs-triage"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## AMD CI Failure Report
+
+        **Include:** Test name • Buildkite link • Error logs
+
+  - type: input
+    id: test-name
+    attributes:
+      label: Failing test
+      description: Fully-qualified test name from the logs
+      placeholder: "tests/distributed/test_basic_distributed_correctness.py::test_models[tp4-DeepSeek-V3]"
+    validations:
+      required: true
+
+  - type: input
+    id: buildkite-link
+    attributes:
+      label: Buildkite link
+      placeholder: "https://buildkite.com/vllm/..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: failure-type
+    attributes:
+      label: Failure type
+      options:
+        - Consistent failure
+        - Flaky (sometimes passes)
+        - New failure (regression)
+        - Timeout
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-logs
+    attributes:
+      label: Error logs
+      description: Relevant portion of the failure output
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: history
+    attributes:
+      label: When did it start failing?
+      placeholder: |
+        Started failing after PR #12345
+        Or: Has been flaky for ~2 weeks
+
+  - type: checkboxes
+    id: investigation
+    attributes:
+      label: Investigation done
+      options:
+        - label: Checked Buildkite Test Suites history
+        - label: Can reproduce locally
+        - label: Identified potential cause

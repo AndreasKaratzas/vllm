@@ -1,0 +1,95 @@
+name: "[AMD] Bug Report"
+description: Report a bug on AMD ROCm hardware
+title: "[AMD Bug]: "
+labels: ["bug", "rocm", "amd", "needs-triage"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Thanks for helping improve vLLM on AMD!
+
+        **Quick tips:** Search existing issues first • Docker commands help us reproduce faster • Include complete error messages
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What's going wrong?
+      description: Tell us what happened and what you expected
+      placeholder: |
+        Expected: Model loads and generates text
+        Actual: Process crashes with "HIP error: invalid device function"
+
+        I'm trying to run DeepSeek-V3 with 4 GPUs and it fails during model loading.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: How urgent is this?
+      options:
+        - Low - Minor issue
+        - Medium - Annoying but manageable
+        - High - Have workaround but painful
+        - Blocking - Cannot use vLLM at all
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: Docker command preferred - helps us reproduce exactly
+      placeholder: |
+        docker run --rm -it \
+          --device=/dev/kfd --device=/dev/dri \
+          --group-add video --shm-size=16g \
+          rocm/vllm:latest bash
+
+        # Inside container:
+        python3 -c "
+        from vllm import LLM
+        llm = LLM(model='deepseek-ai/DeepSeek-V3', tensor_parallel_size=4)
+        "
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        GPU: MI325X (4x)
+        ROCm: 6.2.0
+        vLLM: v0.6.1
+        PyTorch: 2.5.0+rocm6.2
+        Docker: rocm/vllm:latest
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-logs
+    attributes:
+      label: Error message
+      description: Include full traceback
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround (if found)
+      placeholder: Setting VLLM_ROCM_USE_AITER=0 avoids the crash
+
+  - type: dropdown
+    id: worked-before
+    attributes:
+      label: Did this work before?
+      options:
+        - Never worked for me
+        - Worked in previous version
+        - Don't know / First time trying

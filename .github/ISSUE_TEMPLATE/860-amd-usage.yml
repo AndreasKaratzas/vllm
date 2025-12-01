@@ -1,0 +1,76 @@
+name: "[AMD] Usage Question"
+description: Ask questions about using vLLM on AMD/ROCm
+title: "[AMD Usage]: "
+labels: ["rocm", "amd", "needs-triage"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## AMD Usage Question
+
+        **Before asking:** Check the [docs](https://docs.vllm.ai/) • Search [discussions](https://github.com/vllm-project/vllm/discussions) • Search [existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue+label%3Arocm)
+
+        *For bugs, use the Bug Report template instead.*
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: What are you trying to do?
+      options:
+        - Basic setup - First time using vLLM on ROCm
+        - Configuration - Adjusting parameters
+        - Multi-GPU - TP/PP setup
+        - Performance - Optimization and tuning
+        - Docker/deployment
+        - Model support
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      placeholder: |
+        I want to serve Llama-3-70B on 4x MI300X with max throughput.
+
+        Questions:
+        1. What's the optimal tensor_parallel_size?
+        2. Should I use FP8 quantization?
+        3. How do I verify GPUs are fully utilized?
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-approach
+    attributes:
+      label: What you've tried
+      placeholder: |
+        ```python
+        from vllm import LLM
+        llm = LLM(model="meta-llama/Llama-3-70B", tensor_parallel_size=4)
+        # Not sure what else to add
+        ```
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Your setup
+      placeholder: |
+        GPU: 4x MI300X
+        ROCm: 6.2.0
+        vLLM: v0.6.1
+      render: markdown
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: I have checked
+      options:
+        - label: Documentation
+        - label: Existing issues
+        - label: Discussions

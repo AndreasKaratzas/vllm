@@ -1,0 +1,79 @@
+name: "[AMD] Feature Request"
+description: Request a new feature for AMD/ROCm platform
+title: "[AMD Feature]: "
+labels: ["enhancement", "rocm", "amd", "needs-triage"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## AMD Feature Request
+
+        **Great requests explain:** What problem this solves • How you envision it working • Impact on performance
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: |
+        DeepSeek-V3 with 671B params needs 8x MI325X GPUs, but expert parallelism
+        isn't supported on ROCm. This means we can't efficiently serve the model.
+
+        Who it affects: Anyone running large MoE models on AMD hardware
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What's your ideal solution?
+      placeholder: |
+        Add expert parallelism (EP) support:
+
+        llm = LLM(
+            model="deepseek-ai/DeepSeek-V3",
+            tensor_parallel_size=2,
+            expert_parallel_size=4  # NEW
+        )
+
+        Expected benefit: 2-3x higher throughput for MoE models
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: How important is this?
+      options:
+        - Low - Future improvement
+        - Medium - Nice to have
+        - High - Significant impact
+        - Critical - Blocking major use case
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: What would this improve?
+      options:
+        - label: Performance (throughput/latency)
+        - label: Memory efficiency
+        - label: Multi-GPU scaling
+        - label: Easier to use
+        - label: Enables new capability
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Can you help?
+      options:
+        - label: I can help implement this
+        - label: I can help test this
+        - label: I can provide benchmarks
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      placeholder: Links, papers, similar implementations...

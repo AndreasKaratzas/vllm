@@ -1,0 +1,118 @@
+# AMD-Specific Labels for vLLM
+# ============================================================================
+# This file contains ONLY AMD/ROCm-specific labels.
+# Uses skip-delete: true to preserve all existing upstream labels.
+# Run via workflow_dispatch (manual) only - safe for upstream.
+# ============================================================================
+
+# =============================================================================
+# PRIORITY LABELS (AMD-specific SLAs)
+# =============================================================================
+
+- name: P0-critical
+  color: "B60205"
+  description: "Blocks main branch / all PRs / P0 models - 4h response SLA"
+
+- name: P1-high
+  color: "D93F0B"
+  description: "Blocks AMD releases / critical functionality - 24h response SLA"
+
+- name: P2-medium
+  color: "FBCA04"
+  description: "Should be addressed, not urgent - 1 week SLA"
+
+- name: P3-low
+  color: "0E8A16"
+  description: "Nice to have, can be deferred - No SLA"
+
+# =============================================================================
+# AMD PLATFORM & VERSION LABELS
+# =============================================================================
+
+- name: rocm-6.x
+  color: "F5B7B1"
+  description: "ROCm 6.x specific"
+
+- name: rocm-7.x
+  color: "F5B7B1"
+  description: "ROCm 7.x specific"
+
+# =============================================================================
+# AMD HARDWARE LABELS
+# =============================================================================
+
+- name: mi300x
+  color: "F8E08E"
+  description: "MI300X hardware specific"
+
+- name: mi325x
+  color: "F7DC6F"
+  description: "MI325X hardware specific"
+
+- name: mi350-series
+  color: "F0E68C"
+  description: "Future MI350 series hardware"
+
+# =============================================================================
+# AMD COMPONENT LABELS
+# =============================================================================
+
+- name: aiter-backend
+  color: "BFD4F2"
+  description: "AITER attention backend"
+
+- name: rccl
+  color: "7FD5EA"
+  description: "RCCL communication library"
+
+# =============================================================================
+# AMD BLOCKER LABELS
+# =============================================================================
+
+- name: rocm-blocker
+  color: "B60205"
+  description: "Blocks AMD CI entirely"
+
+# =============================================================================
+# AMD PROJECT ROUTING LABELS
+# =============================================================================
+
+- name: amd
+  color: "ED1C24"
+  description: "AMD platform issue - routes to AMD project #38"
+
+- name: amd-ci
+  color: "ED1C24"
+  description: "AMD CI specific - routes to AMD CI project #39"
+
+# =============================================================================
+# AMD STATUS LABELS
+# =============================================================================
+
+- name: needs-profiling
+  color: "BFDADC"
+  description: "Needs profiling data (rocprof) to investigate"
+
+- name: has-workaround
+  color: "C2E0C6"
+  description: "Workaround available"
+
+- name: upstream
+  color: "C2E0C6"
+  description: "Issue in upstream dependency (ROCm/PyTorch/Triton)"
+
+# =============================================================================
+# AMD TEST LABELS
+# =============================================================================
+
+- name: flaky-test
+  color: "F9D0C4"
+  description: "Intermittent/flaky test failure"
+
+- name: "test:distributed"
+  color: "7FB3D5"
+  description: "Multi-GPU test"
+
+- name: "test:benchmark"
+  color: "F9E79F"
+  description: "Performance benchmark test"

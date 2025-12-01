@@ -17,125 +17,248 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
         with:
           script: |
-            // Configuration: Add new labels and keywords here
+            // ================================================================
+            // LABEL CONFIGURATION
+            // Add new labels and their detection rules here
+            // ================================================================
             const labelConfig = {
+              // ==============================================================
+              // ROCm PLATFORM LABEL (existing upstream config - preserved)
+              // ==============================================================
               rocm: {
-                // Keyword search - matches whole words only (with word boundaries)
                 keywords: [
-                  {
-                    term: "composable kernel",
-                    searchIn: "both"
-                  },
-                  {
-                    term: "rccl",
-                    searchIn: "body"  // only search in body
-                  },
-                  {
-                    term: "migraphx",
-                    searchIn: "title"  // only search in title
-                  },
-                  {
-                    term: "hipgraph",
-                    searchIn: "both"
-                  },
-                  {
-                    term: "ROCm System Management Interface",
-                    searchIn: "body"
-                  },
+                  { term: "composable kernel", searchIn: "both" },
+                  { term: "rccl", searchIn: "body" },
+                  { term: "migraphx", searchIn: "title" },
+                  { term: "hipgraph", searchIn: "both" },
+                  { term: "ROCm System Management Interface", searchIn: "body" },
                 ],
-                // Substring search - matches anywhere in text (partial matches)
                 substrings: [
-                  {
-                    term: "VLLM_ROCM_",
-                    searchIn: "both"
-                  },
-                  {
-                    term: "aiter",
-                    searchIn: "title"
-                  },
-                  {
-                    term: "rocm",
-                    searchIn: "title"
-                  },
-                  {
-                    term: "amd",
-                    searchIn: "title"
-                  },
-                  {
-                    term: "hip-",
-                    searchIn: "both"
-                  },
-                  {
-                    term: "gfx",
-                    searchIn: "both"
-                  },
-                  {
-                    term: "cdna",
-                    searchIn: "both"
-                  },
-                  {
-                    term: "rdna",
-                    searchIn: "both"
-                  },
-                  {
-                    term: "torch_hip",
-                    searchIn: "body"  // only in body
-                  },
-                  {
-                    term: "_hip",
-                    searchIn: "both"
-                  },
-                  {
-                    term: "hip_",
-                    searchIn: "both"
-                  },
-                  // ROCm tools and libraries
-                  {
-                    term: "hipify",
-                    searchIn: "both"
-                  },
+                  { term: "VLLM_ROCM_", searchIn: "both" },
+                  { term: "aiter", searchIn: "title" },
+                  { term: "rocm", searchIn: "title" },
+                  { term: "amd", searchIn: "title" },
+                  { term: "hip-", searchIn: "both" },
+                  { term: "gfx", searchIn: "both" },
+                  { term: "cdna", searchIn: "both" },
+                  { term: "rdna", searchIn: "both" },
+                  { term: "torch_hip", searchIn: "body" },
+                  { term: "_hip", searchIn: "both" },
+                  { term: "hip_", searchIn: "both" },
+                  { term: "hipify", searchIn: "both" },
                 ],
-                // Regex patterns - for complex pattern matching
                 regexPatterns: [
                   {
                     pattern: "\\bmi\\d{3}[a-z]*\\b",
                     description: "AMD GPU names (mi + 3 digits + optional letters)",
                     flags: "gi",
-                    searchIn: "both"  // "title", "body", or "both"
+                    searchIn: "both"
                   }
                 ],
               },
+
+              // ==============================================================
+              // CPU LABEL (existing upstream config - preserved)
+              // ==============================================================
               cpu: {
-                // Keyword search - matches whole words only (with word boundaries)
                 keywords: [
+                  { term: "CPU Backend", searchIn: "title" },
+                  { term: "x86", searchIn: "title" },
+                  { term: "ARM", searchIn: "title" },
+                  { term: "Apple Silicon", searchIn: "title" },
+                  { term: "IBM Z", searchIn: "title" },
+                ],
+                substrings: [],
+                regexPatterns: [],
+              },
+
+              // ==============================================================
+              // AMD HARDWARE LABELS
+              // ==============================================================
+              "mi300x": {
+                keywords: [],
+                substrings: [
+                  { term: "mi300x", searchIn: "both" },
+                  { term: "mi300a", searchIn: "both" },
+                  { term: "MI300X", searchIn: "both" },
+                  { term: "MI300A", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              "mi325x": {
+                keywords: [],
+                substrings: [
+                  { term: "mi325x", searchIn: "both" },
+                  { term: "MI325X", searchIn: "both" },
+                  { term: "mi325", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              "mi350-series": {
+                keywords: [],
+                substrings: [
+                  { term: "mi350", searchIn: "both" },
+                  { term: "MI350", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              // ==============================================================
+              // ROCm VERSION LABELS
+              // ==============================================================
+              "rocm-6.x": {
+                keywords: [],
+                substrings: [
+                  { term: "rocm 6.", searchIn: "both" },
+                  { term: "rocm-6.", searchIn: "both" },
+                  { term: "ROCm 6.", searchIn: "both" },
+                ],
+                regexPatterns: [
                   {
-                    term: "CPU Backend",
-                    searchIn: "title"
-                  },
-                  {
-                    term: "x86",
-                    searchIn: "title"
-                  },
-                  {
-                    term: "ARM",
-                    searchIn: "title"
-                  },
-                  {
-                    term: "Apple Silicon",
-                    searchIn: "title"
-                  },
-                  {
-                    term: "IBM Z",
-                    searchIn: "title"
-                  },
+                    pattern: "rocm[:\\s-]?6\\.\\d",
+                    description: "ROCm 6.x version",
+                    flags: "gi",
+                    searchIn: "both"
+                  }
                 ],
               },
-              // Add more label configurations here as needed
-              // example: {
-              //   keywords: [...],
-              //   substrings: [...],
-              //   regexPatterns: [...]
-              // },
+
+              "rocm-7.x": {
+                keywords: [],
+                substrings: [
+                  { term: "rocm 7.", searchIn: "both" },
+                  { term: "rocm-7.", searchIn: "both" },
+                  { term: "ROCm 7.", searchIn: "both" },
+                ],
+                regexPatterns: [
+                  {
+                    pattern: "rocm[:\\s-]?7\\.\\d",
+                    description: "ROCm 7.x version",
+                    flags: "gi",
+                    searchIn: "both"
+                  }
+                ],
+              },
+
+              // ==============================================================
+              // AMD COMPONENT LABELS
+              // ==============================================================
+              "aiter-backend": {
+                keywords: [
+                  { term: "aiter", searchIn: "both" },
+                  { term: "AITER", searchIn: "both" },
+                ],
+                substrings: [
+                  { term: "VLLM_ROCM_USE_AITER", searchIn: "both" },
+                  { term: "aiter backend", searchIn: "both" },
+                  { term: "aiter attention", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              "rccl": {
+                keywords: [
+                  { term: "rccl", searchIn: "both" },
+                  { term: "RCCL", searchIn: "both" },
+                ],
+                substrings: [
+                  { term: "collective communication", searchIn: "body" },
+                ],
+                regexPatterns: [],
+              },
+
+              // ==============================================================
+              // AMD BLOCKER LABELS
+              // ==============================================================
+              "rocm-blocker": {
+                keywords: [],
+                substrings: [
+                  { term: "blocks amd", searchIn: "both" },
+                  { term: "blocks rocm", searchIn: "both" },
+                  { term: "rocm ci broken", searchIn: "both" },
+                  { term: "amd ci broken", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              // ==============================================================
+              // AMD STATUS LABELS
+              // ==============================================================
+              "needs-profiling": {
+                keywords: [],
+                substrings: [
+                  { term: "need profiling", searchIn: "both" },
+                  { term: "needs profiling", searchIn: "both" },
+                  { term: "rocprof", searchIn: "body" },
+                ],
+                regexPatterns: [],
+              },
+
+              "has-workaround": {
+                keywords: [
+                  { term: "workaround", searchIn: "both" },
+                ],
+                substrings: [
+                  { term: "work around", searchIn: "both" },
+                  { term: "temporary fix", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              "upstream": {
+                keywords: [],
+                substrings: [
+                  { term: "upstream bug", searchIn: "both" },
+                  { term: "upstream issue", searchIn: "both" },
+                  { term: "pytorch bug", searchIn: "both" },
+                  { term: "rocm bug", searchIn: "both" },
+                  { term: "triton bug", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              // ==============================================================
+              // AMD TEST LABELS
+              // ==============================================================
+              "flaky-test": {
+                keywords: [
+                  { term: "flaky", searchIn: "both" },
+                  { term: "intermittent", searchIn: "both" },
+                ],
+                substrings: [
+                  { term: "sometimes passes", searchIn: "both" },
+                  { term: "sometimes fails", searchIn: "both" },
+                  { term: "random failure", searchIn: "both" },
+                  { term: "flaky test", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              "test:distributed": {
+                keywords: [],
+                substrings: [
+                  { term: "multi-gpu test", searchIn: "both" },
+                  { term: "distributed test", searchIn: "both" },
+                  { term: "4 gpu", searchIn: "both" },
+                  { term: "8 gpu", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
+
+              "test:benchmark": {
+                keywords: [
+                  { term: "benchmark", searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "benchmark_serving", searchIn: "both" },
+                  { term: "benchmark_throughput", searchIn: "both" },
+                  { term: "tokens/sec", searchIn: "both" },
+                  { term: "throughput test", searchIn: "both" },
+                ],
+                regexPatterns: [],
+              },
             };
             // Helper function to create regex based on search type
             function createSearchRegex(term, type) {
@@ -300,16 +423,36 @@ jobs:
             }
             // Process all configured labels
             const labelsAddedResults = await Promise.all(
-              Object.entries(labelConfig).map(([labelName, config]) => 
+              Object.entries(labelConfig).map(([labelName, config]) =>
                 processLabel(labelName, config).then(added => ({ labelName, added }))
               )
             );
-            
+
             const numLabelsAdded = labelsAddedResults.filter(r => r.added).length;
             core.notice(`Processing complete. ${numLabelsAdded} label(s) added.`);
-            
+
             // Return which labels were added for the next step
             const addedLabels = labelsAddedResults.filter(r => r.added).map(r => r.labelName);
+
+            // If rocm label was added, also add 'amd' label for project routing
+            // (unless 'amd-ci' is already present - CI issues go to different project)
+            const existingLabels = context.payload.issue.labels.map(l => l.name);
+            if (addedLabels.includes('rocm') || existingLabels.includes('rocm')) {
+              const hasAmdCi = existingLabels.includes('amd-ci');
+              const hasAmd = existingLabels.includes('amd');
+
+              if (!hasAmd && !hasAmdCi) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  labels: ['amd'],
+                });
+                addedLabels.push('amd');
+                core.notice('Added "amd" label for project routing (rocm detected)');
+              }
+            }
+
             core.setOutput('labels_added', JSON.stringify(addedLabels));
             return addedLabels;
 
@@ -318,23 +461,44 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
         with:
           script: |
-            // Configuration: Map labels to GitHub users to CC
-            // You can add multiple users per label, and multiple label configurations
+            // ================================================================
+            // CC CONFIGURATION
+            // Map labels to GitHub users to CC
+            // ================================================================
             const ccConfig = {
+              // Core ROCm maintainers
               rocm: {
-                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],  // Add more users as needed: ['user1', 'user2', 'user3']
-                message: 'CC {users} for ROCm-related issue'  // {users} will be replaced with @mentions
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm', 'akaratza'],
+                message: 'CC {users} for ROCm-related issue'
               },
-              // Add more label -> user mappings here
-              // Example:
-              // cuda: {
-              //   users: ['user1', 'user2'],
-              //   message: 'CC {users} for CUDA-related issue'
-              // },
-              // performance: {
-              //   users: ['perfexpert'],
-              //   message: 'CC {users} for performance issue'
-              // },
+              // AMD CI issues - notify CI owners
+              "amd-ci": {
+                users: ['akaratza', 'kennyroche'],
+                message: 'CC {users} for AMD CI issue'
+              },
+              // Hardware-specific
+              "mi300x": {
+                users: ['hongxiayang', 'tjtanaa', 'akaratza'],
+                message: 'CC {users} for MI300X hardware issue'
+              },
+              "mi325x": {
+                users: ['hongxiayang', 'tjtanaa', 'akaratza'],
+                message: 'CC {users} for MI325X hardware issue'
+              },
+              // Component-specific
+              "aiter-backend": {
+                users: ['tjtanaa', 'akaratza'],
+                message: 'CC {users} for AITER backend issue'
+              },
+              "rccl": {
+                users: ['hongxiayang', 'akaratza'],
+                message: 'CC {users} for RCCL communication issue'
+              },
+              // Blockers - notify full team
+              "rocm-blocker": {
+                users: ['hongxiayang', 'tjtanaa', 'gshtras', 'vllmellm', 'akaratza', 'kennyroche'],
+                message: 'CC {users} - ROCm blocker issue needs attention'
+              },
             };
             
             const labelsAdded = JSON.parse('${{ steps.label-step.outputs.labels_added }}');

@@ -1,0 +1,86 @@
+name: "[AMD] Performance Issue"
+description: Report performance problems or optimization opportunities
+title: "[AMD Performance]: "
+labels: ["performance", "rocm", "amd", "needs-triage"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## AMD Performance Issue
+
+        **Helpful tools:** Use our [benchmark script](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py) • Profile with `rocprof --stats` • Monitor with `rocm-smi`
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: What kind of performance issue?
+      options:
+        - Regression - It was faster before
+        - Slower than expected
+        - CUDA gap - Much slower than NVIDIA
+        - Optimization idea
+    validations:
+      required: true
+
+  - type: textarea
+    id: benchmark
+    attributes:
+      label: The numbers
+      description: Actual measurements are most helpful!
+      placeholder: |
+        Current (MI325X):
+        - Throughput: 520 tokens/sec
+        - GPU Utilization: 62%
+
+        Expected/Previous:
+        - Throughput: 1,100 tokens/sec (v0.11.0)
+
+        CUDA H100 (if known):
+        - Throughput: 1,600 tokens/sec
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: Docker + benchmark command preferred
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware & config
+      placeholder: |
+        GPU: 4x MI325X
+        ROCm: 7.1.0
+        Model: DeepSeek-V3, TP=4, FP8
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: profiling
+    attributes:
+      label: Profiling data (if available)
+      placeholder: |
+        Top kernels by time:
+        1. flash_attn_fwd: 125ms (40%) - SLOW
+        2. fp8_dequantize: 48ms (15%)
+      render: shell
+
+  - type: input
+    id: regression-version
+    attributes:
+      label: Last working version (if regression)
+      placeholder: "v0.11.0 or commit abc123"
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workarounds or observations
+      placeholder: Disabling AITER improves performance by 30%

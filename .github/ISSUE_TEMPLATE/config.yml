@@ -3,3 +3,6 @@ contact_links:
   - name: Questions
     url: https://discuss.vllm.ai
     about: Ask questions and discuss with other vLLM community members
+  - name: AMD ROCm Discussions
+    url: https://github.com/vllm-project/vllm/discussions/categories/rocm
+    about: Discuss AMD ROCm specific questions with the community

@@ -1,0 +1,58 @@
+name: "[AMD] Documentation"
+description: Report documentation issues for AMD/ROCm
+title: "[AMD Docs]: "
+labels: ["documentation", "rocm", "amd", "needs-triage"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## AMD Documentation Issue
+
+        Help us improve the docs for ROCm users!
+
+  - type: dropdown
+    id: doc-type
+    attributes:
+      label: What kind of issue?
+      options:
+        - Incorrect information
+        - Outdated content
+        - Missing documentation
+        - Unclear or confusing
+        - Broken link
+        - Typo or formatting
+    validations:
+      required: true
+
+  - type: input
+    id: doc-url
+    attributes:
+      label: Documentation link
+      placeholder: "https://docs.vllm.ai/en/latest/..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue-description
+    attributes:
+      label: What's wrong?
+      placeholder: |
+        Current docs say: "..."
+        Problem: It doesn't explain ROCm-specific setup steps
+        Should include: How to verify ROCm installation
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested-fix
+    attributes:
+      label: Suggested fix
+      placeholder: Add a note explaining ROCm requirements...
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Can you help?
+      options:
+        - label: I can submit a PR to fix this
