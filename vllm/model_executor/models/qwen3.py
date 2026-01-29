@@ -52,6 +52,9 @@ from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe
 
 logger = init_logger(__name__)
 
+# Global counter for tracking layers during forward pass (for debugging)
+_debug_layer_counter = 0
+
 
 class Qwen3Attention(nn.Module):
     def __init__(
@@ -211,20 +214,52 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Track layer number
+        global _debug_layer_counter
+        layer_id = (_debug_layer_counter % 100)  # Assume max 100 layers
+        _debug_layer_counter += 1
+
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        # Debug: Log after input layernorm
+        if layer_id < 3:  # Only log first 3 layers
+            h_mean = hidden_states.mean().item()
+            h_std = hidden_states.std().item()
+            print(f"[LAYER_{layer_id}] RMSNORM_IN: mean={h_mean:.8f} std={h_std:.8f}", flush=True)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
+        # Debug: Log after attention
+        if layer_id < 3:
+            h_mean = hidden_states.mean().item()
+            h_std = hidden_states.std().item()
+            print(f"[LAYER_{layer_id}] ATTN_OUT: mean={h_mean:.8f} std={h_std:.8f}", flush=True)
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+
+        # Debug: Log after post attention layernorm
+        if layer_id < 3:
+            h_mean = hidden_states.mean().item()
+            h_std = hidden_states.std().item()
+            print(f"[LAYER_{layer_id}] RMSNORM_POST: mean={h_mean:.8f} std={h_std:.8f}", flush=True)
+
         hidden_states = self.mlp(hidden_states)
+
+        # Debug: Log after MLP
+        if layer_id < 3:
+            h_mean = hidden_states.mean().item()
+            h_std = hidden_states.std().item()
+            print(f"[LAYER_{layer_id}] MLP_OUT: mean={h_mean:.8f} std={h_std:.8f}", flush=True)
+
         return hidden_states, residual
 
 

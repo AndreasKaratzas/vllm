@@ -301,6 +301,9 @@ if current_platform.is_rocm():
 
 logger = init_logger(__name__)
 
+# Global counter for tracking request numbers (for debugging)
+_debug_request_counter = 0
+
 
 @dataclass
 class AiterFlashAttentionDecodeMetadata:
@@ -990,6 +993,31 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
+
+        # Add numerical logging for debugging
+        global _debug_request_counter
+        _debug_request_counter += 1
+        run_id = _debug_request_counter
+
+        # Only log first 10 requests to avoid spam
+        if run_id <= 10:
+            # Log Q tensor statistics
+            q_mean = query[:num_actual_tokens].mean().item()
+            q_std = query[:num_actual_tokens].std().item()
+            q_min = query[:num_actual_tokens].min().item()
+            q_max = query[:num_actual_tokens].max().item()
+
+            # Log K/V cache statistics
+            k_mean = key_cache.mean().item()
+            k_std = key_cache.std().item()
+            v_mean = value_cache.mean().item()
+            v_std = value_cache.std().item()
+
+            # Print to stdout for visibility
+            print(f"[ATTN_IN] Req {run_id}: Q mean={q_mean:.8f} std={q_std:.8f} min={q_min:.8f} max={q_max:.8f}", flush=True)
+            print(f"[ATTN_IN] Req {run_id}: K_cache mean={k_mean:.8f} std={k_std:.8f}", flush=True)
+            print(f"[ATTN_IN] Req {run_id}: V_cache mean={v_mean:.8f} std={v_std:.8f}", flush=True)
+
         if (
             self.kv_sharing_target_layer_name is None
             and key is not None
@@ -1043,6 +1071,21 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_extend_tokens = attn_metadata.num_extend_tokens
+
+        # Ensure GPU writes to cached blocks complete before reading (gfx950 only)
+        from vllm.platforms import current_platform
+        from vllm.platforms.rocm import on_gfx950
+        if current_platform.is_rocm() and on_gfx950():
+            torch.cuda.synchronize()
+
+        # Debug: Log which path is taken and attention metadata
+        if run_id <= 10:
+            print(f"[PATH] Req {run_id}: decode={num_decodes} extend={num_extends} prefill={num_prefills} | decode_tok={num_decode_tokens} extend_tok={num_extend_tokens} prefill_tok={attn_metadata.num_prefill_tokens if num_prefills > 0 else 0}", flush=True)
+            print(f"[META] Req {run_id}: max_seq_len={attn_metadata.max_seq_len} num_actual_tokens={num_actual_tokens}", flush=True)
+            if num_prefills > 0 and attn_metadata.prefill_metadata:
+                qsl = attn_metadata.prefill_metadata.query_start_loc.cpu().tolist()
+                print(f"[META] Req {run_id}: prefill query_start_loc={qsl[:min(5, len(qsl))]}", flush=True)
+
         if not attn_metadata.use_cascade:
             # calculate for pure prefills
             if num_prefills > 0:
@@ -1211,5 +1254,15 @@ class AiterFlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "Cascade attention is not implemented for ROCM AITER"
             )
+
+        # Log attention output statistics
+        if run_id <= 10:
+            out_mean = output[:num_actual_tokens].mean().item()
+            out_std = output[:num_actual_tokens].std().item()
+            out_min = output[:num_actual_tokens].min().item()
+            out_max = output[:num_actual_tokens].max().item()
+
+            # Print to stdout for visibility
+            print(f"[ATTN_OUT] Req {run_id}: mean={out_mean:.8f} std={out_std:.8f} min={out_min:.8f} max={out_max:.8f}", flush=True)
 
         return output

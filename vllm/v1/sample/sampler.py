@@ -16,6 +16,9 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
 
+# Global counter for tracking request numbers (for debugging)
+_debug_request_counter = 0
+
 
 class Sampler(nn.Module):
     """
@@ -89,6 +92,18 @@ class Sampler(nn.Module):
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
 
+        # Debug: Log logits statistics
+        global _debug_request_counter
+        _debug_request_counter += 1
+        run_id = _debug_request_counter
+
+        if run_id <= 30:  # Log first 30 to cover all decode steps
+            logits_mean = logits.mean().item()
+            logits_std = logits.std().item()
+            logits_min = logits.min().item()
+            logits_max = logits.max().item()
+            print(f"[LOGITS] Req {run_id}: mean={logits_mean:.8f} std={logits_std:.8f} min={logits_min:.8f} max={logits_max:.8f}", flush=True)
+
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
         )
@@ -102,6 +117,13 @@ class Sampler(nn.Module):
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
+        # Debug: Log sampled tokens and their logprobs
+        if run_id <= 30 and processed_logprobs is not None:
+            # Get logprobs for sampled tokens
+            sampled_logprobs = processed_logprobs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
+            for i, (token_id, logprob) in enumerate(zip(sampled.cpu().tolist(), sampled_logprobs.cpu().tolist())):
+                print(f"[SAMPLE] Req {run_id} tok_{i}: token={token_id} logprob={logprob:.8f}", flush=True)
+
         if num_logprobs is None:
             logprobs_tensors = None
         elif num_logprobs == -1:
@@ -114,6 +136,16 @@ class Sampler(nn.Module):
             logprobs_tensors = self.gather_logprobs(
                 raw_logprobs, num_logprobs, token_ids=sampled
             )
+
+            # Debug: Log top-k logprobs
+            if run_id <= 30:
+                # logprobs_tensors.logprob_token_ids: [num_tokens, num_logprobs+1]
+                # logprobs_tensors.logprobs: [num_tokens, num_logprobs+1]
+                for i in range(min(logprobs_tensors.logprob_token_ids.shape[0], 1)):  # Only log first token
+                    top_ids = logprobs_tensors.logprob_token_ids[i].cpu().tolist()[:5]
+                    top_probs = logprobs_tensors.logprobs[i].cpu().tolist()[:5]
+                    top_pairs = list(zip(top_ids, top_probs))
+                    print(f"[TOPK] Req {run_id} tok_{i}: top5={top_pairs}", flush=True)
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)

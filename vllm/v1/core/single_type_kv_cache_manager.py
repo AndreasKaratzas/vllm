@@ -431,9 +431,12 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             if cached_block := block_pool.get_cached_block(
                 block_hash, kv_cache_group_ids
             ):
-                for computed, cached in zip(computed_blocks, cached_block):
+                print(f"[CACHE_MGR] Cache HIT: {len(cached_block)} blocks for hash={block_hash}")
+                for i, (computed, cached) in enumerate(zip(computed_blocks, cached_block)):
+                    print(f"  Block {i}: id={cached.block_id}")
                     computed.append(cached)
             else:
+                print(f"[CACHE_MGR] Cache MISS for hash={block_hash}")
                 break
         if use_eagle and computed_blocks[0]:
             # Need to drop the last matched block if eagle is enabled.
