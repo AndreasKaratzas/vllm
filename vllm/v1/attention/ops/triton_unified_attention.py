@@ -959,12 +959,8 @@ def unified_attention(
     q_dtype_is_bf16 = q.dtype == torch.bfloat16
     if current_platform.is_rocm() and on_gfx950() and q_dtype_is_bf16:
         IN_PRECISION = "ieee"
-        # NEW: Enable deterministic tile ordering for prefix caching
+        # Enable deterministic tile ordering for prefix caching
         DETERMINISTIC_CACHE = os.getenv("VLLM_DETERMINISTIC_CACHE", "1") == "1"
-        # DEBUG: Verify fix is being applied
-        if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
-            det_str = "DETERMINISTIC" if DETERMINISTIC_CACHE else "NORMAL"
-            print(f"[UNIFIED_ATTN_FIX] IN_PRECISION='ieee' {det_str}_MODE (q_shape={q.shape})")
     else:
         IN_PRECISION = None
         DETERMINISTIC_CACHE = False
