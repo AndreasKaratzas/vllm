@@ -60,17 +60,13 @@ class BlockHashToBlockMap:
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
         """
         Gets any block with the given block hash key.
-        For determinism, when multiple blocks exist, return the one with lowest block_id.
         """
         blocks = self._cache.get(key)
         if blocks is not None:
             if isinstance(blocks, KVCacheBlock):
                 return blocks
             if isinstance(blocks, dict):
-                # For determinism, always return block with lowest block_id
-                selected = min(blocks.values(), key=lambda b: b.block_id)
-                available_ids = [b.block_id for b in blocks.values()]
-                return selected
+                return next(iter(blocks.values()))
             self._unexpected_blocks_type(blocks)
         return None
 
