@@ -193,6 +193,26 @@ class KVCacheManager:
             )
         )
 
+        # DEBUG: Track cache hits/misses with request numbering
+        import os
+        if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
+            # Track which request this is (R1, R2, R3, etc.)
+            if not hasattr(self, '_request_counter'):
+                self._request_counter = 0
+                self._request_map = {}
+            
+            if request.request_id not in self._request_map:
+                self._request_counter += 1
+                self._request_map[request.request_id] = self._request_counter
+            
+            req_num = self._request_map[request.request_id]
+            cache_hit_str = 'YES' if num_new_computed_tokens > 0 else 'NO'
+            
+            print(f"[R{req_num:02d}_CACHE_LOOKUP] "
+                  f"num_tokens={request.num_tokens} "
+                  f"cached_tokens={num_new_computed_tokens} "
+                  f"cache_hit={cache_hit_str}")
+
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.record(

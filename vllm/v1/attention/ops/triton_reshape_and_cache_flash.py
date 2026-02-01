@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+import os
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+# Debug flag to track cache writes (set via environment variable)
+DEBUG_CACHE_WRITES = os.getenv("VLLM_DEBUG_CACHE_WRITES", "0") == "1"
 
 
 @triton.jit
@@ -123,6 +127,12 @@ def triton_reshape_and_cache_flash(
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
 ):
+    # DEBUG: Track K/V before writing to cache
+    if DEBUG_CACHE_WRITES and key.shape[0] > 0:
+        print(f"[CACHE_WRITE] tokens={key.shape[0]} " 
+              f"k_mean={key[0].mean().item():.10f} k_std={key[0].std().item():.10f} "
+              f"v_mean={value[0].mean().item():.10f} v_std={value[0].std().item():.10f}")
+    
     num_heads = key.shape[1]
     head_size = key.shape[2]
 

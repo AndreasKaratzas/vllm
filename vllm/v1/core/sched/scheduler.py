@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+import os
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -147,6 +148,13 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        
+        # Deterministic prefix cache: track requests needing two-pass computation
+        self.deterministic_prefix_requests: dict[str, int] = {}  # request_id -> split_point
+        self.deterministic_prefix_enabled = (
+            os.getenv("VLLM_DETERMINISTIC_PREFIX_CACHE", "0") == "1"
+        )
+        
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -662,6 +670,44 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
+                    
+                    # DETERMINISTIC PREFIX CACHE: Handle two-pass computation
+                    if (
+                        self.deterministic_prefix_enabled
+                        and hasattr(request, '_deterministic_split_point')
+                        and request.request_id not in self.deterministic_prefix_requests
+                    ):
+                        # First pass: compute only the prefix
+                        split_point = request._deterministic_split_point
+                        if num_computed_tokens == 0 and split_point > 0:
+                            # Mark this request for two-pass processing
+                            self.deterministic_prefix_requests[request.request_id] = split_point
+                            
+                            # Limit to prefix tokens only for this pass
+                            num_new_tokens = min(num_new_tokens, split_point)
+                            
+                            if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
+                                logger.info(
+                                    "[DETERMINISTIC_SCHED] Pass 1: Computing prefix [0:%d] "
+                                    "for request %s",
+                                    num_new_tokens, request.request_id[-12:]
+                                )
+                    elif (
+                        request.request_id in self.deterministic_prefix_requests
+                        and num_computed_tokens >= self.deterministic_prefix_requests[request.request_id]
+                    ):
+                        # Second pass: compute remaining tokens with cached prefix
+                        if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
+                            logger.info(
+                                "[DETERMINISTIC_SCHED] Pass 2: Computing suffix with "
+                                "cached prefix for request %s (computed=%d, split=%d)",
+                                request.request_id[-12:],
+                                num_computed_tokens,
+                                self.deterministic_prefix_requests[request.request_id]
+                            )
+                        # Remove from tracking - this request is now normal
+                        del self.deterministic_prefix_requests[request.request_id]
+                    
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -774,6 +820,24 @@ class Scheduler(SchedulerInterface):
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
+                
+                # DETERMINISTIC PREFIX CACHE: Check if prefix pass is complete
+                if (
+                    request.request_id in self.deterministic_prefix_requests
+                    and request.num_computed_tokens >= self.deterministic_prefix_requests[request.request_id]
+                    and request.num_computed_tokens < request.num_tokens
+                ):
+                    # Prefix pass is complete, but we need to continue to suffix
+                    # Mark that we should re-schedule this request for pass 2
+                    if not hasattr(request, '_needs_suffix_pass'):
+                        request._needs_suffix_pass = True  # type: ignore
+                        
+                        if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
+                            logger.info(
+                                "[DETERMINISTIC_SCHED] Prefix complete for %s, "
+                                "will schedule suffix next",
+                                request.request_id[-12:]
+                            )
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
@@ -1629,6 +1693,28 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            # DETERMINISTIC PREFIX CACHE: Tag requests for two-pass processing
+            if (
+                self.deterministic_prefix_enabled
+                and request.prompt_token_ids is not None
+                and len(request.prompt_token_ids) > self.block_size
+            ):
+                # Calculate split point at block boundary
+                num_blocks = len(request.prompt_token_ids) // self.block_size
+                split_point = num_blocks * self.block_size
+                
+                if split_point >= self.block_size:
+                    request._deterministic_split_point = split_point  # type: ignore
+                    
+                    if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
+                        logger.info(
+                            "[DETERMINISTIC] Tagged request %s for two-pass: "
+                            "tokens=%d, split_at=%d",
+                            request.request_id[-12:],
+                            len(request.prompt_token_ids),
+                            split_point
+                        )
+            
             if request.resumable:
                 request.streaming_queue = deque()
             self.waiting.add_request(request)
