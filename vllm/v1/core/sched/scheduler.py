@@ -678,26 +678,11 @@ class Scheduler(SchedulerInterface):
                             
                             # Limit to prefix tokens only for this pass
                             num_new_tokens = min(num_new_tokens, split_point)
-                            
-                            if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
-                                logger.info(
-                                    "[DETERMINISTIC_SCHED] Pass 1: Computing prefix [0:%d] "
-                                    "for request %s",
-                                    num_new_tokens, request.request_id[-12:]
-                                )
+
                     elif (
                         request.request_id in self.deterministic_prefix_requests
                         and num_computed_tokens >= self.deterministic_prefix_requests[request.request_id]
                     ):
-                        # Second pass: compute remaining tokens with cached prefix
-                        if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
-                            logger.info(
-                                "[DETERMINISTIC_SCHED] Pass 2: Computing suffix with "
-                                "cached prefix for request %s (computed=%d, split=%d)",
-                                request.request_id[-12:],
-                                num_computed_tokens,
-                                self.deterministic_prefix_requests[request.request_id]
-                            )
                         # Remove from tracking - this request is now normal
                         del self.deterministic_prefix_requests[request.request_id]
                     
@@ -824,13 +809,6 @@ class Scheduler(SchedulerInterface):
                     # Mark that we should re-schedule this request for pass 2
                     if not hasattr(request, '_needs_suffix_pass'):
                         request._needs_suffix_pass = True  # type: ignore
-                        
-                        if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
-                            logger.info(
-                                "[DETERMINISTIC_SCHED] Prefix complete for %s, "
-                                "will schedule suffix next",
-                                request.request_id[-12:]
-                            )
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
@@ -1701,16 +1679,7 @@ class Scheduler(SchedulerInterface):
                 
                 if split_point >= self.block_size:
                     request._deterministic_split_point = split_point  # type: ignore
-                    
-                    if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
-                        logger.info(
-                            "[DETERMINISTIC] Tagged request %s for two-pass: "
-                            "tokens=%d, split_at=%d",
-                            request.request_id[-12:],
-                            len(request.prompt_token_ids),
-                            split_point
-                        )
-            
+
             if request.resumable:
                 request.streaming_queue = deque()
             self.waiting.add_request(request)

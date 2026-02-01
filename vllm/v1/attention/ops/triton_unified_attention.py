@@ -103,8 +103,6 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    IN_PRECISION: tl.constexpr,  # str or None, for BF16 determinism
-    DETERMINISTIC_CACHE: tl.constexpr,  # NEW: Force deterministic tile order
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -318,11 +316,7 @@ def kernel_unified_attention_2d(
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
-        # Apply IN_PRECISION to Q*K dot product for gfx950 determinism
-        if IN_PRECISION is not None:
-            S += scale * tl.dot(Q, K, input_precision=IN_PRECISION)
-        else:
-            S += scale * tl.dot(Q, K)
+        S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -386,15 +380,7 @@ def kernel_unified_attention_2d(
             )
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        # Fix for BF16 prefix caching: when IN_PRECISION is set (e.g., "ieee" for gfx950),
-        # keep P in FP32 to avoid precision loss from P.to(V.dtype) conversion.
-        # This ensures deterministic outputs regardless of tile processing order.
-        if IN_PRECISION is not None:
-            # Keep P in FP32, upcast V to match P's dtype for the dot product
-            acc += tl.dot(P.to(V.dtype), V, input_precision=IN_PRECISION)
-        else:
-            # Original behavior: convert P to V's dtype for performance
-            acc += tl.dot(P.to(V.dtype), V)
+        acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
     acc = acc / L[:, None]
@@ -465,8 +451,6 @@ def kernel_unified_attention_3d(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
-    IN_PRECISION: tl.constexpr,  # str or None, for BF16 determinism
-    DETERMINISTIC_CACHE: tl.constexpr,  # NEW: Force deterministic tile order
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -686,11 +670,7 @@ def kernel_unified_attention_3d(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        # Apply IN_PRECISION to Q*K dot product for gfx950 determinism
-        if IN_PRECISION is not None:
-            S += scale * tl.dot(Q, K, input_precision=IN_PRECISION)
-        else:
-            S += scale * tl.dot(Q, K)
+        S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -754,15 +734,7 @@ def kernel_unified_attention_3d(
             )
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        # Fix for BF16 prefix caching: when IN_PRECISION is set (e.g., "ieee" for gfx950),
-        # keep P in FP32 to avoid precision loss from P.to(V.dtype) conversion.
-        # This ensures deterministic outputs regardless of tile processing order.
-        if IN_PRECISION is not None:
-            # Keep P in FP32, upcast V to match P's dtype for the dot product
-            acc += tl.dot(P, V.to(P.dtype), input_precision=IN_PRECISION)
-        else:
-            # Original behavior: convert P to V's dtype for performance
-            acc += tl.dot(P.to(V.dtype), V)
+        acc += tl.dot(P.to(V.dtype), V)
 
     segm_output_offset = (
         query_offset_0[:, None].to(tl.int64)
@@ -944,27 +916,6 @@ def unified_attention(
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
 
-    # Set IN_PRECISION for BF16 on gfx950 to ensure deterministic prefix caching
-    # Root cause: gfx950 has non-deterministic floating-point accumulation with
-    # bfloat16 due to instruction reordering and SIMD lane scheduling differences.
-    # Using "ieee" precision mode forces IEEE-754 compliant operations which
-    # ensures bit-exact determinism across different execution paths (cache hit
-    # vs cache miss). This is critical for prefix caching correctness.
-    #
-    # Performance impact: ~5-10% slower attention on gfx950, but necessary for
-    # correctness. Future hardware generations may not need this workaround.
-    from vllm.platforms import current_platform
-    from vllm.platforms.rocm import on_gfx950
-    import os
-    q_dtype_is_bf16 = q.dtype == torch.bfloat16
-    if current_platform.is_rocm() and on_gfx950() and q_dtype_is_bf16:
-        IN_PRECISION = "ieee"
-        # Enable deterministic tile ordering for prefix caching
-        DETERMINISTIC_CACHE = os.getenv("VLLM_DETERMINISTIC_CACHE", "1") == "1"
-    else:
-        IN_PRECISION = None
-        DETERMINISTIC_CACHE = False
-
     use_mm_prefix = False
     max_mm_ranges = 0
     if mm_prefix_range is not None:
@@ -1085,8 +1036,6 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
-            IN_PRECISION=IN_PRECISION,
-            DETERMINISTIC_CACHE=DETERMINISTIC_CACHE,
         )
     else:
         kernel_unified_attention_3d[
@@ -1139,8 +1088,6 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
-            IN_PRECISION=IN_PRECISION,
-            DETERMINISTIC_CACHE=DETERMINISTIC_CACHE,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,

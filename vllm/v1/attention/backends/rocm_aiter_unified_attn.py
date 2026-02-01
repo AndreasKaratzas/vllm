@@ -20,9 +20,6 @@ from vllm.v1.attention.backends.rocm_attn import (
 
 logger = init_logger(__name__)
 
-# Global counter for tracking request numbers (for debugging)
-_debug_request_counter = 0
-
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     accept_output_buffer: bool = True
@@ -160,41 +157,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        # Ensure GPU writes to cached blocks complete before reading (gfx950 only)
-        from vllm.platforms import current_platform
-        from vllm.platforms.rocm import on_gfx950
-        if current_platform.is_rocm() and on_gfx950():
-            torch.cuda.synchronize()
-
         descale_shape = (
             cu_seqlens_q.shape[0] - 1,
             key.shape[1] if key is not None else self.num_kv_heads,
         )
-
-        # Add numerical logging for debugging
-        global _debug_request_counter
-        _debug_request_counter += 1
-        run_id = _debug_request_counter
-
-        # Only log first 10 requests to avoid spam
-        if run_id <= 10:
-            # Log Q tensor statistics
-            q_mean = query[:num_actual_tokens].mean().item()
-            q_std = query[:num_actual_tokens].std().item()
-            q_min = query[:num_actual_tokens].min().item()
-            q_max = query[:num_actual_tokens].max().item()
-
-            # Log K/V cache statistics
-            k_mean = key_cache.mean().item()
-            k_std = key_cache.std().item()
-            v_mean = value_cache.mean().item()
-            v_std = value_cache.std().item()
-
-            # Write to file since subprocess stdout is buffered
-            with open('/tmp/aiter_attn_debug.log', 'a') as f:
-                f.write(f"[ATTN_IN] Req {run_id}: Q mean={q_mean:.8f} std={q_std:.8f} min={q_min:.8f} max={q_max:.8f}\n")
-                f.write(f"[ATTN_IN] Req {run_id}: K_cache mean={k_mean:.8f} std={k_std:.8f}\n")
-                f.write(f"[ATTN_IN] Req {run_id}: V_cache mean={v_mean:.8f} std={v_std:.8f}\n")
 
         self.unified_attention(
             q=query[:num_actual_tokens],
@@ -217,17 +183,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
         )
-
-        # Log attention output statistics
-        if run_id <= 10:
-            out_mean = output[:num_actual_tokens].mean().item()
-            out_std = output[:num_actual_tokens].std().item()
-            out_min = output[:num_actual_tokens].min().item()
-            out_max = output[:num_actual_tokens].max().item()
-
-            # Write to file since subprocess stdout is buffered
-            with open('/tmp/aiter_attn_debug.log', 'a') as f:
-                f.write(f"[ATTN_OUT] Req {run_id}: mean={out_mean:.8f} std={out_std:.8f} min={out_min:.8f} max={out_max:.8f}\n")
 
         return output
 

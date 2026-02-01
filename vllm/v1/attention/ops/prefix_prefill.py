@@ -5,13 +5,9 @@
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
 import torch
-import os
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-
-# Debug flag to track cache reads (set via environment variable)
-DEBUG_CACHE_READS = os.getenv("VLLM_DEBUG_CACHE_READS", "0") == "1"
 
 # Static kernels parameters
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
@@ -659,37 +655,13 @@ def context_attention_fwd(
     sinks=None,
     is_block_table_ptr: bool = False,
 ):
-    # DEBUG: Track attention computation
-    if DEBUG_CACHE_READS:
-        print(f"[ATTN_FWD] q_shape={q.shape} k_shape={k.shape} v_shape={v.shape} "
-              f"batch={b_seq_len.shape[0]} max_seq_len={max_seq_len} max_input_len={max_input_len}")
-        if k_cache is not None and k_cache.numel() > 0:
-            # Sample first few elements from cache
-            print(f"[CACHE_READ] k_cache_shape={k_cache.shape} k_cache_sample_mean={k_cache[0,0,:10].float().mean().item():.10f}")
-            print(f"[CACHE_READ] v_cache_shape={v_cache.shape} v_cache_sample_mean={v_cache[0,0,:10].float().mean().item():.10f}")
-    
     q_dtype_is_f32 = q.dtype is torch.float32
-    q_dtype_is_bf16 = q.dtype == torch.bfloat16
 
     # Turing does have tensor core for float32 multiplication
     # use ieee as fallback for triton kernels work. There is also
     # warning on vllm/config.py to inform users this fallback
     # implementation
-    #
-    # CRITICAL FIX for gfx950: Set IN_PRECISION for bfloat16 on gfx950 to ensure
-    # deterministic prefix caching. Without this, cache miss and cache hit produce
-    # different outputs due to non-deterministic floating-point accumulation.
-    from vllm.platforms.rocm import on_gfx950
-    if IS_TURING and q_dtype_is_f32:
-        IN_PRECISION = "ieee"
-    elif current_platform.is_rocm() and on_gfx950() and q_dtype_is_bf16:
-        IN_PRECISION = "ieee"  # FIX for prefix caching non-determinism on gfx950
-        # DEBUG: Confirm fix is active
-        import os
-        if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
-            print(f"[PREFIX_PREFILL_FIX] IN_PRECISION='ieee' applied for gfx950+bf16")
-    else:
-        IN_PRECISION = None
+    IN_PRECISION = "ieee" if IS_TURING and q_dtype_is_f32 else None
 
     # Conversion of FP8 Tensor from uint8 storage to
     # appropriate torch.dtype for interpretation by Triton

@@ -990,7 +990,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
-
         if (
             self.kv_sharing_target_layer_name is None
             and key is not None
@@ -1044,7 +1043,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_extend_tokens = attn_metadata.num_extend_tokens
-
         if not attn_metadata.use_cascade:
             # calculate for pure prefills
             if num_prefills > 0:

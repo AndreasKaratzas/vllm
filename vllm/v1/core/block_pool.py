@@ -65,16 +65,13 @@ class BlockHashToBlockMap:
         blocks = self._cache.get(key)
         if blocks is not None:
             if isinstance(blocks, KVCacheBlock):
-                print(f"[CACHE_GET] Single block: id={blocks.block_id}, hash={key}")
                 return blocks
             if isinstance(blocks, dict):
                 # For determinism, always return block with lowest block_id
                 selected = min(blocks.values(), key=lambda b: b.block_id)
                 available_ids = [b.block_id for b in blocks.values()]
-                print(f"[CACHE_GET] Multiple blocks for hash={key}, selected id={selected.block_id}, available={available_ids}")
                 return selected
             self._unexpected_blocks_type(blocks)
-        print(f"[CACHE_GET] Cache MISS for hash={key}")
         return None
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
@@ -275,16 +272,8 @@ class BlockPool:
             )
             blk.block_hash = block_hash_with_group_id
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
-            print(f"[CACHE_PUT] Cached block: id={blk.block_id}, hash={block_hash_with_group_id}, ref_cnt={blk.ref_cnt}")
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
-
-        # Ensure GPU write completes before marking blocks as cached (gfx950 only)
-        import torch
-        from vllm.platforms import current_platform
-        from vllm.platforms.rocm import on_gfx950
-        if current_platform.is_rocm() and on_gfx950():
-            torch.cuda.synchronize()
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:

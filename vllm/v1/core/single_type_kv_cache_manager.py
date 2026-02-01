@@ -431,17 +431,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             if cached_block := block_pool.get_cached_block(
                 block_hash, kv_cache_group_ids
             ):
-                import os
-                if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
-                    hash_short = block_hash.hex()[:16] if block_hash else "None"
-                    print(f"[CACHE_HIT] hash={hash_short}... matched_blocks={len(cached_block)}")
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed.append(cached)
             else:
-                import os
-                if os.getenv("VLLM_DEBUG_PREFIX_CACHE", "0") == "1":
-                    hash_short = block_hash.hex()[:16] if block_hash else "None"
-                    print(f"[CACHE_MISS] hash={hash_short}... stopping cache search")
                 break
         if use_eagle and computed_blocks[0]:
             # Need to drop the last matched block if eagle is enabled.
