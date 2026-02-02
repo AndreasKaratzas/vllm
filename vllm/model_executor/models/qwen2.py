@@ -105,9 +105,18 @@ class Qwen2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        print(f"MLP input shape: {x.shape}")
+        print(f"MLP input[0,:8]: {x[0,:8].tolist()}")
+        
         gate_up, _ = self.gate_up_proj(x)
+        print(f"After gate_up_proj[0,:8]: {gate_up[0,:8].tolist()}")
+        
         x = self.act_fn(gate_up)
+        print(f"After act_fn[0,:8]: {x[0,:8].tolist()}")
+        
         x, _ = self.down_proj(x)
+        print(f"After down_proj[0,:8]: {x[0,:8].tolist()}")
+        
         return x
 
 
@@ -422,11 +431,40 @@ class Qwen2Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        
+        # ============ DEBUG: Check what's being passed in ============
+        should_debug = (positions.shape[-1] > 1 and positions.shape[-1] < 35)
+        if should_debug:
+            first_pos = positions[0].item() if positions.dim() == 1 else positions[0, 0].item()
+            num_tokens = positions.shape[-1] if positions.dim() == 1 else positions.shape[-1]
+            print(f"\n{'='*70}")
+            print(f"Qwen2Model.forward() ENTRY")
+            print(f"  positions: first={first_pos}, num_tokens={num_tokens}")
+            print(f"  positions tensor: {positions.tolist() if positions.dim() == 1 else positions[0, :10].tolist()}")
+            if input_ids is not None:
+                print(f"  input_ids.shape = {input_ids.shape}")
+                print(f"  input_ids[:20] = {input_ids[:20].tolist()}")
+                # Check what token is at position 16
+                if first_pos <= 16 < first_pos + num_tokens:
+                    idx_16 = 16 - first_pos
+                    print(f"  Token at position 16 (idx={idx_16}): input_ids[{idx_16}] = {input_ids[idx_16].item()}")
+            print(f"{'='*70}")
+        # ============ DEBUG END ============
+        
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
+            
+            # ============ DEBUG: Check embeddings ============
+            if should_debug:
+                print(f"  After embedding: hidden_states.shape = {hidden_states.shape}")
+                if first_pos <= 16 < first_pos + hidden_states.shape[0]:
+                    idx_16 = 16 - first_pos
+                    print(f"  Embedding[pos=16] (idx={idx_16}) = {hidden_states[idx_16, :8].tolist()}")
+            # ============ DEBUG END ============
+            
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -437,9 +475,28 @@ class Qwen2Model(nn.Module):
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
+            # ============ DEBUG: Track layer transitions ============
+            has_pos_16 = should_debug and (first_pos <= 16 < first_pos + hidden_states.shape[0])
+            if has_pos_16 and idx < 2:  # Only first 2 layers
+                idx_16 = 16 - first_pos
+                layer_input = hidden_states + residual if residual is not None else hidden_states
+                print(f"\n  [Layer {idx}] INPUT[pos=16] (idx={idx_16}) = {layer_input[idx_16, :8].tolist()}")
+                if residual is not None:
+                    print(f"  [Layer {idx}] hidden_states[pos=16] = {hidden_states[idx_16, :8].tolist()}")
+                    print(f"  [Layer {idx}] residual[pos=16] = {residual[idx_16, :8].tolist()}")
+            # ============ DEBUG END ============
+            
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
+            
+            # ============ DEBUG: Track layer outputs ============
+            if has_pos_16 and idx < 2:
+                layer_output = hidden_states + residual
+                print(f"  [Layer {idx}] OUTPUT[pos=16] = {layer_output[idx_16, :8].tolist()}")
+                print(f"  [Layer {idx}] hidden_states after = {hidden_states[idx_16, :8].tolist()}")
+                print(f"  [Layer {idx}] residual after = {residual[idx_16, :8].tolist()}")
+            # ============ DEBUG END ============
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

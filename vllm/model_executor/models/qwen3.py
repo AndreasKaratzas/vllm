@@ -139,6 +139,18 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # ============ DEBUG: Track position 16 ============
+        should_debug = (hidden_states.shape[0] > 1 and hidden_states.shape[0] < 35)
+        if should_debug:
+            if not hasattr(self, '_debug_positions_seen'):
+                self._debug_positions_seen = set()
+            first_pos = positions[0].item()
+            # Only print once per unique starting position
+            if first_pos not in self._debug_positions_seen:
+                self._debug_positions_seen.add(first_pos)
+                print(f"\n=== Qwen3Attention Layer 0, positions starting at {first_pos} ===")
+        # ============ DEBUG END ============
+        
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
@@ -148,8 +160,42 @@ class Qwen3Attention(nn.Module):
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
+        
+        # ============ DEBUG: Print K[16] after RoPE ============
+        if should_debug and first_pos not in {0, 16}:
+            pass  # Skip intermediate layers
+        elif should_debug:
+            k_reshaped = k.view(k.shape[0], -1, self.head_dim)
+            print(f"K before RoPE: shape={k_reshaped.shape}")
+            if first_pos <= 16 < first_pos + k_reshaped.shape[0]:
+                idx_16 = 16 - first_pos
+                print(f"  K[pos=16] before RoPE = {k_reshaped[idx_16, 0, :8].tolist()}")
+        # ============ DEBUG END ============
+        
         q, k = self.rotary_emb(positions, q, k)
+        
+        # ============ DEBUG: Print K[16] after RoPE ============
+        if should_debug and first_pos not in {0, 16}:
+            pass
+        elif should_debug:
+            k_reshaped = k.view(k.shape[0], -1, self.head_dim)
+            if first_pos <= 16 < first_pos + k_reshaped.shape[0]:
+                idx_16 = 16 - first_pos
+                print(f"  K[pos=16] after RoPE = {k_reshaped[idx_16, 0, :8].tolist()}")
+        # ============ DEBUG END ============
+        
         attn_output = self.attn(q, k, v)
+        
+        # ============ DEBUG: Print attention output[16] ============
+        if should_debug and first_pos not in {0, 16}:
+            pass
+        elif should_debug:
+            print(f"ATTN_OUTPUT: shape={attn_output.shape}")
+            if first_pos <= 16 < first_pos + attn_output.shape[0]:
+                idx_16 = 16 - first_pos
+                print(f"  ATTN_OUT[pos=16] = {attn_output[idx_16, :8].tolist()}")
+        # ============ DEBUG END ============
+        
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -211,20 +257,58 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # ============ DEBUG: Track position 16 between layers - ONLY FIRST LAYER ============
+        should_debug = (hidden_states.shape[0] > 1 and hidden_states.shape[0] < 35)
+        is_first_layer = (residual is None)  # First layer has no residual input
+        first_pos = positions[0].item() if should_debug else -1
+        has_pos_16 = should_debug and (first_pos <= 16 < first_pos + hidden_states.shape[0])
+        idx_16 = 16 - first_pos if has_pos_16 else 0
+        
+        if should_debug and is_first_layer and has_pos_16:
+            print(f"\n  [DecoderLayer Layer 0] Input, hidden_states[pos=16,:8] = {hidden_states[idx_16, :8].tolist()}")
+        # ============ DEBUG END ============
+        
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            
+        # ============ DEBUG: After input norm ============
+        if should_debug and is_first_layer and has_pos_16:
+            print(f"  [DecoderLayer Layer 0] After input_norm, hidden_states[pos=16,:8] = {hidden_states[idx_16, :8].tolist()}")
+            print(f"  [DecoderLayer Layer 0] Residual after norm[pos=16,:8] = {residual[idx_16, :8].tolist()}")
+        # ============ DEBUG END ============
+        
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+        
+        # ============ DEBUG: After self_attn, before post_norm ============
+        if should_debug and is_first_layer and has_pos_16:
+            print(f"  [DecoderLayer Layer 0] After self_attn, hidden_states[pos=16,:8] = {hidden_states[idx_16, :8].tolist()}")
+            print(f"  [DecoderLayer Layer 0] Residual before post_norm[pos=16,:8] = {residual[idx_16, :8].tolist()}")
+        # ============ DEBUG END ============
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        
+        # ============ DEBUG: After post_norm, before MLP ============
+        if should_debug and is_first_layer and has_pos_16:
+            print(f"  [DecoderLayer Layer 0] After post_norm, hidden_states[pos=16,:8] = {hidden_states[idx_16, :8].tolist()}")
+            print(f"  [DecoderLayer Layer 0] Residual after post_norm[pos=16,:8] = {residual[idx_16, :8].tolist()}")
+        # ============ DEBUG END ============
+        
         hidden_states = self.mlp(hidden_states)
+        
+        # ============ DEBUG: After MLP ============
+        if should_debug and is_first_layer and has_pos_16:
+            print(f"  [DecoderLayer Layer 0] After MLP, hidden_states[pos=16,:8] = {hidden_states[idx_16, :8].tolist()}")
+            print(f"  [DecoderLayer Layer 0] Final output[pos=16,:8] = {(hidden_states[idx_16, :8] + residual[idx_16, :8]).tolist() if residual is not None else 'N/A'}")
+        # ============ DEBUG END ============
+        
         return hidden_states, residual
 
 

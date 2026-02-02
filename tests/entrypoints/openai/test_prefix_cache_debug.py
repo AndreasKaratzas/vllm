@@ -298,15 +298,15 @@ def print_top5_comparison_table(results_dict, tokenizer, max_positions=10):
     
     print("-" * (14 + num_methods * (col_width + 1)))
 
-
 def print_full_comparison_table(hf_with_cache, hf_without_cache, vllm_with_pc, vllm_without_pc, tokenizer):
     """Print a comprehensive comparison table."""
-    print(f"\n{'='*140}")
+    print(f"\n{'='*180}")
     print("FULL COMPARISON TABLE")
-    print(f"{'='*140}")
+    print(f"{'='*180}")
     print(f"{'Pos':<4} {'Token':<10} {'HF+Cache':<12} {'HF-Cache':<12} "
-          f"{'vLLM+PC R1':<12} {'vLLM+PC R2':<12} {'vLLM-PC R1':<12} {'vLLM-PC R2':<12}")
-    print("-" * 140)
+          f"{'vLLM+PC R1':<12} {'vLLM+PC R2':<12} {'vLLM+PC R3':<12} {'vLLM+PC R4':<12} "
+          f"{'vLLM-PC R1':<12} {'vLLM-PC R2':<12}")
+    print("-" * 180)
     
     num_positions = min(
         10,
@@ -321,6 +321,8 @@ def print_full_comparison_table(hf_with_cache, hf_without_cache, vllm_with_pc, v
         hf_nocache = hf_without_cache['logprobs'][pos]
         vllm_pc_r1 = vllm_with_pc[0]['logprobs'][pos]
         vllm_pc_r2 = vllm_with_pc[1]['logprobs'][pos]
+        vllm_pc_r3 = vllm_with_pc[2]['logprobs'][pos]
+        vllm_pc_r4 = vllm_with_pc[3]['logprobs'][pos]
         vllm_nopc_r1 = vllm_without_pc[0]['logprobs'][pos]
         vllm_nopc_r2 = vllm_without_pc[1]['logprobs'][pos]
         
@@ -328,19 +330,20 @@ def print_full_comparison_table(hf_with_cache, hf_without_cache, vllm_with_pc, v
         token_str = repr(tokenizer.decode([token_id]))[:8]
         
         print(f"{pos:<4} {token_str:<10} {hf_cache:<12.6f} {hf_nocache:<12.6f} "
-              f"{vllm_pc_r1:<12.6f} {vllm_pc_r2:<12.6f} {vllm_nopc_r1:<12.6f} {vllm_nopc_r2:<12.6f}")
+              f"{vllm_pc_r1:<12.6f} {vllm_pc_r2:<12.6f} {vllm_pc_r3:<12.6f} {vllm_pc_r4:<12.6f} "
+              f"{vllm_nopc_r1:<12.6f} {vllm_nopc_r2:<12.6f}")
     
-    print("-" * 140)
+    print("-" * 180)
 
 
 def print_difference_analysis(hf_with_cache, hf_without_cache, vllm_with_pc, vllm_without_pc, tokenizer):
     """Print analysis of differences."""
-    print(f"\n{'='*100}")
+    print(f"\n{'='*128}")
     print("DIFFERENCE ANALYSIS")
-    print(f"{'='*100}")
-    print(f"{'Pos':<4} {'Token':<10} {'HF+C vs HF-C':<14} {'vLLM+PC R1-R2':<14} "
+    print(f"{'='*128}")
+    print(f"{'Pos':<4} {'Token':<10} {'HF+C vs HF-C':<14} {'vLLM+PC R1-R2':<14} {'vLLM+PC R2-R3':<14} {'vLLM+PC R3-R4':<14} "
           f"{'vLLM-PC R1-R2':<14} {'vLLM+PC vs HF':<14} {'vLLM-PC vs HF':<14}")
-    print("-" * 100)
+    print("-" * 128)
     
     num_positions = min(
         10,
@@ -354,6 +357,8 @@ def print_difference_analysis(hf_with_cache, hf_without_cache, vllm_with_pc, vll
         hf_nocache = hf_without_cache['logprobs'][pos]
         vllm_pc_r1 = vllm_with_pc[0]['logprobs'][pos]
         vllm_pc_r2 = vllm_with_pc[1]['logprobs'][pos]
+        vllm_pc_r3 = vllm_with_pc[2]['logprobs'][pos]
+        vllm_pc_r4 = vllm_with_pc[3]['logprobs'][pos]
         vllm_nopc_r1 = vllm_without_pc[0]['logprobs'][pos]
         vllm_nopc_r2 = vllm_without_pc[1]['logprobs'][pos]
         
@@ -362,7 +367,9 @@ def print_difference_analysis(hf_with_cache, hf_without_cache, vllm_with_pc, vll
         
         # Calculate differences
         diff_hf = hf_cache - hf_nocache
-        diff_vllm_pc = vllm_pc_r1 - vllm_pc_r2
+        diff_vllm_pc_r1_r2 = vllm_pc_r1 - vllm_pc_r2
+        diff_vllm_pc_r2_r3 = vllm_pc_r2 - vllm_pc_r3
+        diff_vllm_pc_r3_r4 = vllm_pc_r3 - vllm_pc_r4
         diff_vllm_nopc = vllm_nopc_r1 - vllm_nopc_r2
         diff_vllm_pc_hf = vllm_pc_r2 - hf_nocache  # Use R2 and HF without cache as reference
         diff_vllm_nopc_hf = vllm_nopc_r2 - hf_nocache
@@ -372,10 +379,10 @@ def print_difference_analysis(hf_with_cache, hf_without_cache, vllm_with_pc, vll
             marker = "✗" if abs(val) > threshold else "✓"
             return f"{marker} {val:+.6f}"
         
-        print(f"{pos:<4} {token_str:<10} {fmt(diff_hf, 1e-6):<14} {fmt(diff_vllm_pc):<14} "
+        print(f"{pos:<4} {token_str:<10} {fmt(diff_hf, 1e-6):<14} {fmt(diff_vllm_pc_r1_r2):<14} {fmt(diff_vllm_pc_r2_r3):<14} {fmt(diff_vllm_pc_r3_r4):<14} "
               f"{fmt(diff_vllm_nopc):<14} {fmt(diff_vllm_pc_hf, 0.01):<14} {fmt(diff_vllm_nopc_hf, 0.01):<14}")
     
-    print("-" * 100)
+    print("-" * 128)
 
 
 @pytest.mark.asyncio
@@ -466,6 +473,8 @@ async def test_side_by_side():
         "--max-model-len", "1024",
         "--enforce-eager",
         "--generation-config", "vllm",
+        "--attention-backend", "ROCM_ATTN",
+        "--max-num-seqs", "1",
     ]
     
     with RemoteOpenAIServer(MODEL_NAME, args_with_pc) as server:
@@ -492,6 +501,8 @@ async def test_side_by_side():
         "--enforce-eager",
         "--generation-config", "vllm",
         "--no-enable-prefix-caching",
+        "--attention-backend", "ROCM_ATTN",
+        "--max-num-seqs", "1",
     ]
     
     with RemoteOpenAIServer(MODEL_NAME, args_without_pc) as server:
