@@ -77,6 +77,17 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    enable_dual_pass_prefix_cache: bool = False
+    """Enable dual-pass prefix caching for ROCm. When enabled on ROCm with
+    prefix caching, splits the first request's prefill into two passes at the
+    block boundary to ensure that suffix tokens are always processed with the
+    same batch size as future cache-hit requests. This avoids non-deterministic
+    behavior in rocBLAS BF16 GEMM operations caused by different batch sizes
+    selecting different Tensile kernel variants with different floating-point
+    accumulation orders. Only adds one extra scheduling step for the first
+    request per unique prefix (cache miss scenario). All subsequent cache-hit
+    requests and autoregressive decode steps are unaffected. Has no effect on
+    non-ROCm platforms or when prefix caching is disabled."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
     - "sha256" uses Pickle for object serialization before hashing. This is the
@@ -189,6 +200,7 @@ class CacheConfig:
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
+            "enable_dual_pass_prefix_cache",
             "prefix_caching_hash_algo",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",

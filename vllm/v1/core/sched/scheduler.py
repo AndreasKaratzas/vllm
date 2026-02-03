@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from vllm import envs
+from vllm.platforms import current_platform
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -147,6 +148,30 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+
+        # Dual-pass prefix cache for ROCm:
+        # rocBLAS BF16 GEMM produces non-deterministic results when the same
+        # input row is processed in different batch sizes. With prefix caching,
+        # the first request (cache miss) processes all tokens in one batch,
+        # while subsequent requests (cache hit) process only the suffix.
+        # This causes different Tensile GEMM kernel variants to be selected,
+        # which use different accumulation orders and produce numerically
+        # different results due to floating-point non-associativity.
+        #
+        # To ensure determinism, we split the first request's prefill into
+        # two passes at the block boundary:
+        #   Pass 1: tokens [0, split_point)     → fills prefix cache blocks
+        #   Pass 2: tokens [split_point, end)   → same batch size as cache hits
+        #
+        # This only adds one extra scheduling step for the first request per
+        # unique prefix. All subsequent cache-hit requests and autoregressive
+        # decode steps are completely unaffected.
+        self.use_dual_pass_prefix_cache = (
+            current_platform.is_rocm()
+            and self.cache_config.enable_prefix_caching
+            and self.cache_config.enable_dual_pass_prefix_cache
+        )
+
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -312,6 +337,87 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def _apply_dual_pass_prefix_limit(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+    ) -> int:
+        """
+        For ROCm dual-pass prefix caching: ensure that no single
+        scheduling step crosses the prefix cache block boundary during
+        prefill.
+
+        This guarantees that the suffix tokens (those after the last full
+        block) are always processed as a separate batch, matching the exact
+        batch size that future cache-hit requests will use. This avoids
+        rocBLAS BF16 GEMM non-determinism caused by different batch sizes
+        selecting different Tensile kernel variants with different
+        floating-point accumulation orders.
+
+        The split point is the largest multiple of block_size that is
+        strictly less than the total prompt length:
+
+            split_point = (num_tokens // block_size) * block_size
+
+        Examples with block_size=16:
+            31 tokens → split at 16, suffix = 15
+            50 tokens → split at 48, suffix = 2
+            64 tokens → split at 64, no split needed (exactly aligned)
+            100 tokens → split at 96, suffix = 4
+
+        This method is called in both the RUNNING and WAITING sections
+        of schedule() to handle chunked prefill correctly: even if
+        multiple scheduling steps are needed for prefill, the split
+        point boundary is never crossed within a single step.
+
+        Args:
+            request: The request being scheduled.
+            num_computed_tokens: Number of tokens already computed
+                (from local cache, external cache, or prior steps).
+            num_new_tokens: Number of new tokens the scheduler wants
+                to process in this step.
+
+        Returns:
+            Adjusted num_new_tokens, potentially reduced to avoid
+            crossing the split point boundary.
+        """
+        # Only applies during prefill — once we're generating output
+        # tokens, batch sizes are always 1 (autoregressive decode)
+        # and there's no non-determinism concern.
+        if request.num_output_tokens > 0:
+            return num_new_tokens
+
+        total_prompt_tokens = request.num_tokens
+
+        # The split point: last block-aligned position before end of prompt
+        split_point = (total_prompt_tokens // self.block_size) * self.block_size
+
+        # No split needed if:
+        # 1. Prompt is exactly block-aligned → suffix would be 0 tokens,
+        #    the entire prompt fits in cached blocks, nothing to split.
+        # 2. Prompt is shorter than one block → can't form any cached
+        #    blocks, so there's no prefix/suffix distinction.
+        # 3. Already computed past the split point → the prefix blocks
+        #    are done (either from cache or prior steps), we're now
+        #    computing the suffix which should proceed normally.
+        if (
+            split_point == total_prompt_tokens
+            or split_point == 0
+            or num_computed_tokens >= split_point
+        ):
+            return num_new_tokens
+
+        # Would this scheduling step cross the split point boundary?
+        # If so, truncate to stop exactly at the split point.
+        if num_computed_tokens + num_new_tokens > split_point:
+            return split_point - num_computed_tokens
+
+        # The step stays within the prefix region — no adjustment needed.
+        # This happens during chunked prefill when the prefix itself
+        # requires multiple scheduling steps.
+        return num_new_tokens
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -398,6 +504,14 @@ class Scheduler(SchedulerInterface):
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
                     request, num_new_tokens
+                )
+
+            # Dual-pass prefix cache (ROCm): during prefill, ensure
+            # this scheduling step does not cross the block boundary so
+            # that the suffix is always computed as a separate batch.
+            if self.use_dual_pass_prefix_cache:
+                num_new_tokens = self._apply_dual_pass_prefix_limit(
+                    request, request.num_computed_tokens, num_new_tokens,
                 )
 
             if num_new_tokens == 0:
@@ -686,6 +800,14 @@ class Scheduler(SchedulerInterface):
                     )
                     if num_new_tokens == 0:
                         break
+
+                # Dual-pass prefix cache (ROCm): during prefill, ensure
+                # this scheduling step does not cross the block boundary so
+                # that the suffix is always computed as a separate batch.
+                if self.use_dual_pass_prefix_cache:
+                    num_new_tokens = self._apply_dual_pass_prefix_limit(
+                        request, num_computed_tokens, num_new_tokens,
+                    )
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an

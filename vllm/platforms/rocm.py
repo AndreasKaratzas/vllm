@@ -478,6 +478,17 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+        # Validate dual-pass prefix cache configuration
+        if (
+            cache_config
+            and cache_config.enable_dual_pass_prefix_cache
+            and not cache_config.enable_prefix_caching
+        ):
+            raise ValueError(
+                "--enable-dual-pass-prefix-cache requires "
+                "--enable-prefix-caching to be enabled."
+            )
+
         if cache_config and cache_config.block_size is None:
             if (
                 envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION and envs.VLLM_ROCM_USE_AITER

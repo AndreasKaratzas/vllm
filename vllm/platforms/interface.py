@@ -396,7 +396,19 @@ class Platform:
 
         The config is passed by reference, so it can be modified in place.
         """
-        pass
+        # Warn if dual-pass prefix cache is enabled on non-ROCm platforms
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config
+            and cache_config.enable_dual_pass_prefix_cache
+            and not cls.is_rocm()
+        ):
+            logger.warning(
+                "--enable-dual-pass-prefix-cache is designed for ROCm "
+                "platforms and has no effect on %s. This flag works around "
+                "rocBLAS BF16 GEMM non-determinism issues specific to AMD GPUs.",
+                cls.get_device_name(),
+            )
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
