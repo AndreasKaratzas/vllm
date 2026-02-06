@@ -154,8 +154,8 @@ steps:
 
 - label: Entrypoints Integration Test (API Server 1) # 100min
   timeout_in_minutes: 130
-  mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_1
+  mirror_hardwares: [amdexperimental, amdandreas]
+  agent_pool: mi325_8
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -1017,7 +1017,7 @@ steps:
 
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 100
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -1035,8 +1035,8 @@ steps:
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 5min
   timeout_in_minutes: 10
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdandreas]
+  agent_pool: mi325_2
   # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
@@ -1050,8 +1050,8 @@ steps:
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
-  mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_1
+  mirror_hardwares: [amdexperimental, amdandreas]
+  agent_pool: mi325_4
   # grade: Blocking
   optional: true
   source_file_dependencies:
