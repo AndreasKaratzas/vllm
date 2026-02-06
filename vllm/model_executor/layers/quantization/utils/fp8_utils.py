@@ -33,6 +33,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    _ceil_to_ue8m0,
     fp8_gemm_nt,
     get_tma_aligned_size,
     is_deep_gemm_e8m0_used,
@@ -854,6 +855,35 @@ def _per_token_group_quant_fp8_colmajor(
     tl.store(y_s_ptr, y_s)
 
 
+def _native_per_token_group_quant_fp8(
+    x: torch.Tensor,
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    group_size: int,
+    eps: float,
+    fp8_min: float,
+    fp8_max: float,
+    use_ue8m0: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pure PyTorch per-token-group FP8 quantization matching the reference.
+    Used when numerical consistency with the reference is required (e.g. tests).
+    """
+    assert x.shape[-1] % group_size == 0
+    assert x.is_contiguous()
+
+    x_ = x.reshape(x.numel() // group_size, group_size)
+    amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    scale = amax / fp8_max
+    if use_ue8m0:
+        scale = _ceil_to_ue8m0(scale)
+    x_q_out = (x_ / scale).clamp(min=fp8_min, max=fp8_max).to(x_q.dtype)
+    x_q_out = x_q_out.reshape(x.shape)
+    x_q.copy_(x_q_out)
+    x_s_out = scale.reshape(x.shape[:-1] + (x.shape[-1] // group_size,))
+    x_s.copy_(x_s_out)
+    return x_q, x_s
+
+
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -863,6 +893,8 @@ def per_token_group_quant_fp8(
     tma_aligned_scales: bool = False,
     out_q: torch.Tensor | None = None,
     use_ue8m0: bool | None = None,
+    *,
+    use_triton_for_accuracy: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
@@ -921,7 +953,14 @@ def per_token_group_quant_fp8(
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
     # prefer CUDA kernel if available
-    # TODO(bnell): this causes some fp8 moe test to fail.
+    # Use native PyTorch when numerical consistency with reference is required
+    # (e.g. block-wise quant in fused MoE). The CUDA/Triton kernels can produce
+    # different fp8 values due to rounding differences, causing test failures.
+    if use_triton_for_accuracy:
+        return _native_per_token_group_quant_fp8(
+            x, x_q, x_s, group_size, eps, fp8_min, fp8_max, use_ue8m0
+        )
+
     if current_platform.is_cuda() and x.is_contiguous():
         torch.ops._C.per_token_group_fp8_quant(
             x, x_q, x_s, group_size, eps, fp8_min, fp8_max, use_ue8m0
