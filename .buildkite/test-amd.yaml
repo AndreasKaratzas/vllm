@@ -104,7 +104,7 @@ steps:
 
 - label: Basic Correctness Test # 20min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   fast_check: true
@@ -190,7 +190,7 @@ steps:
 
 - label: Entrypoints Integration Test (Pooling)
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
@@ -405,7 +405,7 @@ steps:
 
 - label: V1 Test others # 42min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -858,7 +858,7 @@ steps:
 
 - label: Basic Models Tests (Other)
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -886,7 +886,7 @@ steps:
 
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -900,7 +900,7 @@ steps:
 
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_8
   # grade: Blocking
   torch_nightly: true
@@ -921,7 +921,7 @@ steps:
 
 - label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_8
   # grade: Blocking
   torch_nightly: true
@@ -942,7 +942,7 @@ steps:
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   optional: true
@@ -958,7 +958,7 @@ steps:
 
 - label: Language Models Test (PPL)
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   optional: true
@@ -970,7 +970,7 @@ steps:
 
 - label: Language Models Test (Extended Pooling)  # 36min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   optional: true
@@ -982,7 +982,7 @@ steps:
 
 - label: Language Models Test (MTEB)
   timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   optional: true
@@ -1018,7 +1018,7 @@ steps:
 
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 100
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -1051,7 +1051,7 @@ steps:
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   optional: true
@@ -1066,7 +1066,7 @@ steps:
 
 - label: Multi-Modal Models Test (Extended) 2 #60min
   timeout_in_minutes: 120
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   optional: true
@@ -1081,7 +1081,7 @@ steps:
 
 - label: Multi-Modal Models Test (Extended) 3 # 75min
   timeout_in_minutes: 150
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   optional: true
@@ -1096,7 +1096,7 @@ steps:
 
 - label: Quantized Models Test # 45 min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdandreas]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -1340,7 +1340,7 @@ steps:
 
 - label: Distributed Model Tests (2 GPUs) # 37min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdandreas]
   agent_pool: mi325_2
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
