@@ -468,6 +468,10 @@ def dummy_hf_overrides(
     # Kimi uses `num_expert_group` instead of `n_group`.
     if n_group is None:
         n_group = getattr(text_config, "num_expert_group", None)
+    num_experts_per_tok = getattr(text_config, "num_experts_per_tok", None)
+    if num_experts_per_tok is None:
+        num_experts_per_tok = getattr(text_config, "num_experts_per_token", None)
+    num_experts_per_tok = 1 if num_experts_per_tok == 1 else 2
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
@@ -486,6 +490,7 @@ def dummy_hf_overrides(
                 "Gemma3nForConditionalGeneration",
                 "Gemma4ForCausalLM",
                 "Gemma4ForConditionalGeneration",
+                "Gemma4MTPModel",
             )
             else 1
         )
@@ -509,9 +514,9 @@ def dummy_hf_overrides(
         update_dict.update(
             {
                 "num_experts": num_experts,
-                "num_experts_per_tok": 2,
+                "num_experts_per_tok": num_experts_per_tok,
                 # Kimi uses `num_experts_per_token`.
-                "num_experts_per_token": 2,
+                "num_experts_per_token": num_experts_per_tok,
                 "num_local_experts": num_experts,
                 # Otherwise there will not be any expert layers
                 "first_k_dense_replace": 0,

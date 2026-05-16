@@ -476,6 +476,12 @@ class FusedMoE(PluggableLayer):
                 )
             )
 
+    def rebuild_internal_moe_kernel_after_topology_change(self) -> bool:
+        rebuilt = self.quant_method.rebuild_moe_kernel_after_topology_change(self)
+        if rebuilt:
+            self.runner._replace_quant_method(self.quant_method)
+        return rebuilt
+
     @property
     def shared_experts(self) -> SharedExperts | None:
         return self.runner.shared_experts

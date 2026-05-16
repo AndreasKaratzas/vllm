@@ -332,6 +332,94 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
         )
 
 
+@pytest.mark.parametrize(
+    (
+        "dtype, aiter_enabled, gfx9, gfx1x, flash_attn_available, "
+        "flash_attn_triton_available, expected_backend"
+    ),
+    [
+        (
+            torch.float16,
+            True,
+            True,
+            False,
+            True,
+            False,
+            AttentionBackendEnum.ROCM_AITER_FA,
+        ),
+        (
+            torch.float16,
+            False,
+            True,
+            False,
+            True,
+            False,
+            AttentionBackendEnum.FLASH_ATTN,
+        ),
+        (
+            torch.float32,
+            False,
+            True,
+            False,
+            True,
+            False,
+            AttentionBackendEnum.TORCH_SDPA,
+        ),
+        (
+            torch.float16,
+            False,
+            False,
+            True,
+            False,
+            True,
+            AttentionBackendEnum.FLASH_ATTN,
+        ),
+        (
+            torch.float16,
+            False,
+            False,
+            False,
+            False,
+            False,
+            AttentionBackendEnum.TORCH_SDPA,
+        ),
+    ],
+)
+def test_vit_attention_backend_selection(
+    dtype,
+    aiter_enabled,
+    gfx9,
+    gfx1x,
+    flash_attn_available,
+    flash_attn_triton_available,
+    expected_backend,
+):
+    """Test ROCm ViT/MM encoder attention backend selection."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    def find_spec(name: str):
+        if name == "flash_attn" and flash_attn_available:
+            return object()
+        return None
+
+    with (
+        patch(
+            "vllm._aiter_ops.rocm_aiter_ops.is_enabled",
+            return_value=aiter_enabled,
+        ),
+        patch("vllm.platforms.rocm.on_gfx9", return_value=gfx9),
+        patch("vllm.platforms.rocm.on_gfx1x", return_value=gfx1x),
+        patch(
+            "vllm.platforms.rocm.flash_attn_triton_available",
+            return_value=flash_attn_triton_available,
+        ),
+        patch("importlib.util.find_spec", side_effect=find_spec),
+    ):
+        backend = RocmPlatform.get_vit_attn_backend(head_size=64, dtype=dtype)
+
+    assert backend == expected_backend
+
+
 def test_sparse_not_supported(mock_vllm_config):
     """Test that sparse MLA without use_mla flag raises an error."""
     from vllm.platforms.rocm import RocmPlatform

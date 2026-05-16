@@ -31,6 +31,7 @@ from vllm.v1.executor.ray_utils import (
     build_actor_name,
     get_bundles_for_indices,
     get_bundles_sorted_by_node,
+    get_visible_devices_env_vars,
     initialize_ray_cluster,
     ray,
 )
@@ -83,8 +84,11 @@ class RayWorkerProc(WorkerProc):
 
     CUDA_VISIBLE_DEVICES setup flow:
 
-    1. RayExecutorV2 enables RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES so Ray does
-       not set CUDA_VISIBLE_DEVICES on RayWorkerProc actors at creation time.
+    1. On CUDA, RayExecutorV2 enables RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
+       so Ray does not set CUDA_VISIBLE_DEVICES on RayWorkerProc actors at
+       creation time. On ROCm, vLLM imports can initialize the HIP runtime during
+       actor module import, so Ray must set per-actor CUDA/HIP visibility before
+       the actor starts.
     2. Each actor is scheduled with a placement group and bundle index; Ray resolves
        the physical GPU ID for that bundle at placement time.
     3. After placement, the worker discovers that GPU ID and sets
@@ -228,7 +232,10 @@ class RayExecutorV2(MultiprocExecutor):
         runtime_env: dict = copy.deepcopy(dict(base)) if base else {}
 
         env_vars = runtime_env.setdefault("env_vars", {})
-        env_vars.update({v: "1" for v in current_platform.ray_noset_device_env_vars})
+        if not current_platform.is_rocm():
+            env_vars.update(
+                {v: "1" for v in current_platform.ray_noset_device_env_vars}
+            )
         if self.parallel_config.ray_workers_use_nsight:
             runtime_env["nsight"] = {
                 "t": "cuda,cudnn,cublas",
@@ -383,12 +390,17 @@ class RayExecutorV2(MultiprocExecutor):
         # this executor on its node; local_rank indexes into that set.
         init_worker_refs = []
         for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
-            local_rank = node_workers[node_id].index(i)
-            worker_env_vars = {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
+            if current_platform.is_rocm():
+                # On ROCm, Ray's per-actor CUDA/HIP visibility must be kept:
+                # importing vLLM can initialize the HIP runtime before this
+                # method runs, so expanding visibility here is too late.
+                local_rank = 0
+                worker_env_vars = {}
+            else:
+                local_rank = node_workers[node_id].index(i)
+                worker_env_vars = get_visible_devices_env_vars(
+                    ",".join(map(str, node_gpus[node_id]))
+                )
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
                 self.ray_worker_handles[i].actor.initialize_worker.remote(

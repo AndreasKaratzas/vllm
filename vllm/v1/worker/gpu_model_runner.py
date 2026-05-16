@@ -200,6 +200,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunne
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
+    can_create_request_aligned_ubatch_slices,
     check_ubatch_thresholds,
     maybe_create_ubatch_slices,
     split_attn_metadata,
@@ -3743,6 +3744,14 @@ class GPUModelRunner(
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
+            allow_microbatching = allow_microbatching and (
+                not self.parallel_config.use_ubatching
+                or can_create_request_aligned_ubatch_slices(
+                    num_scheduled_tokens_np,
+                    num_tokens_padded,
+                    self.parallel_config.num_ubatches,
+                )
+            )
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,

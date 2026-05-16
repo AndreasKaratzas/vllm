@@ -16,8 +16,20 @@ Layer skipping (``modules_to_not_convert``) is configured in the model's
 diverse prompts from ``tests/prompts/example.txt``.
 """
 
-import pytest
+from functools import lru_cache
 
+import pytest
+import torch
+
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+    select_mxfp8_moe_backend,
+)
 from tests.quantization.utils import is_quant_method_supported
 
 from ..utils import check_logprobs_close
@@ -32,12 +44,50 @@ MAX_TOKENS = 4
 NUM_LOG_PROBS = 8
 
 
+@lru_cache
+def _is_mxfp8_moe_backend_supported() -> bool:
+    # The method-level quantization gate also covers dense linear emulation.
+    # MoE needs a separately selectable backend, so mirror the runtime oracle
+    # here instead of assuming all MXFP8-capable platforms support MXFP8 MoE.
+    config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=2048,
+        intermediate_size_per_partition=1024,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        routing_method=RoutingMethodType.Default,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+    )
+    try:
+        select_mxfp8_moe_backend(config)
+    except ValueError:
+        return False
+    return True
+
+
+MODEL_PARAMS = [
+    pytest.param(DENSE_MODEL, id="dense"),
+    pytest.param(
+        MOE_MODEL,
+        marks=pytest.mark.skipif(
+            not _is_mxfp8_moe_backend_supported(),
+            reason="No MXFP8 MoE backend is available on this platform.",
+        ),
+        id="moe",
+    ),
+]
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("mxfp8"),
     reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
 )
 @pytest.mark.quant_model
-@pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
+@pytest.mark.parametrize("model", MODEL_PARAMS)
 def test_mxfp8_logprobs(
     vllm_runner,
     example_prompts,
@@ -86,7 +136,7 @@ def test_mxfp8_logprobs(
     reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
 )
 @pytest.mark.quant_model
-@pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
+@pytest.mark.parametrize("model", MODEL_PARAMS)
 def test_mxfp8_generation(vllm_runner, model: str) -> None:
     """Smoke test: verify online MXFP8 model generates coherent text."""
     prompt = "1 2 3 4 5"

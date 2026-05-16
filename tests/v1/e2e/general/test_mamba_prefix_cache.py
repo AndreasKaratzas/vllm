@@ -4,7 +4,7 @@ import multiprocessing as mp
 import os
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import datasets
@@ -45,18 +45,25 @@ class StepAction:
 
 num_speculative_tokens = 3
 
-num_accepted_tokens = 1
-prompt_token_ids: list[int] = []
 MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 BLOCK_SIZE = 560
 DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
-cur_step_action_idx = 0
-cur_step_action: StepAction | None = None
-step_actions: list[StepAction] = []
 
 
-def get_fake_sample_fn() -> SamplerOutput:
+@dataclass
+class RuntimeState:
+    num_accepted_tokens: int = 1
+    prompt_token_ids: list[int] = field(default_factory=list)
+    cur_step_action_idx: int = 0
+    cur_step_action: StepAction | None = None
+    step_actions: list[StepAction] = field(default_factory=list)
+    mamba_kv_cache_dict: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(
+        default_factory=dict
+    )
+
+
+def get_fake_sample_fn(state: RuntimeState) -> SamplerOutput:
     def fake_sample_fn(
         self: GPUModelRunner,
         logits: torch.Tensor | None,
@@ -72,15 +79,15 @@ def get_fake_sample_fn() -> SamplerOutput:
         if spec_decode_metadata is None:
             return SamplerOutput(
                 sampled_token_ids=torch.tensor(
-                    [[prompt_token_ids[first_token_id_index]]],
+                    [[state.prompt_token_ids[first_token_id_index]]],
                     device=DEVICE_TYPE,
                     dtype=torch.int32,
                 ),
                 logprobs_tensors=None,
             )
-        accepted_tokens = prompt_token_ids[
+        accepted_tokens = state.prompt_token_ids[
             first_token_id_index : first_token_id_index
-            + min(num_accepted_tokens, logits.shape[0])
+            + min(state.num_accepted_tokens, logits.shape[0])
         ]
         sampled_token_ids = accepted_tokens
         return SamplerOutput(
@@ -95,7 +102,7 @@ def get_fake_sample_fn() -> SamplerOutput:
     return fake_sample_fn
 
 
-def get_fake_propose_draft_token_ids_fn():
+def get_fake_propose_draft_token_ids_fn(state: RuntimeState):
     def fake_propose_draft_token_ids_fn(
         self: GPUModelRunner,
         scheduler_output: SchedulerOutput,
@@ -121,23 +128,23 @@ def get_fake_propose_draft_token_ids_fn():
             )  # bonus token isn't considered as computed
         first_token_id_index += self.input_batch.num_accepted_tokens_cpu[0].item()
         proposed_draft_token_ids = [
-            prompt_token_ids[
+            state.prompt_token_ids[
                 first_token_id_index : first_token_id_index + num_speculative_tokens
             ]
         ]
 
         next_token_ids = torch.tensor(
-            prompt_token_ids[
+            state.prompt_token_ids[
                 first_token_id_index - 1 : first_token_id_index
                 - 1
-                + num_accepted_tokens
+                + state.num_accepted_tokens
             ],
             device=DEVICE_TYPE,
             dtype=torch.int32,
         )
 
         valid_sampled_tokens_count = torch.tensor(
-            [num_accepted_tokens],
+            [state.num_accepted_tokens],
             device=DEVICE_TYPE,
             dtype=torch.int32,
         )
@@ -153,22 +160,26 @@ def get_fake_propose_draft_token_ids_fn():
     return fake_propose_draft_token_ids_fn
 
 
-def get_fake_step_action_fn(original_step_action_fn: Callable):
+def get_fake_step_action_fn(original_step_action_fn: Callable, state: RuntimeState):
     def fake_get_output(self: InprocClient):
-        global cur_step_action_idx
-        global cur_step_action
-        if cur_step_action_idx < len(step_actions):
-            cur_step_action = step_actions[cur_step_action_idx]
-            cur_step_action_idx += 1
+        if state.cur_step_action_idx < len(state.step_actions):
+            state.cur_step_action = state.step_actions[state.cur_step_action_idx]
+            state.cur_step_action_idx += 1
         else:
-            cur_step_action = None
-        print(f"cur_step_action: {cur_step_action_idx=} {cur_step_action=}")
+            state.cur_step_action = None
+        print(
+            "cur_step_action: "
+            f"cur_step_action_idx={state.cur_step_action_idx} "
+            f"cur_step_action={state.cur_step_action}"
+        )
         return original_step_action_fn(self)
 
     return fake_get_output
 
 
-def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
+def get_fake_allocate_slots_fn(
+    original_allocate_slots_fn: Callable, state: RuntimeState
+):
     def fake_allocate_slots_fn(
         self: KVCacheManager,
         request: Request,
@@ -193,22 +204,21 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             num_encoder_tokens,
             full_sequence_must_fit,
         )
-        if cur_step_action is not None:
+        if state.cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
                 request.request_id
             ]
             not_null_block_flags = [not block.is_null for block in cur_block_ids]
             block_ids = [1 if block else 0 for block in not_null_block_flags]
-            assert block_ids == cur_step_action.kv_cache_block_ids
+            assert block_ids == state.cur_step_action.kv_cache_block_ids
         return ret
 
     return fake_allocate_slots_fn
 
 
-mamba_kv_cache_dict = {}
-
-
-def get_fake_execute_model_fn(original_execute_model_fn: Callable):
+def get_fake_execute_model_fn(
+    original_execute_model_fn: Callable, state: RuntimeState
+):
     last_num_computed_tokens = 0
     num_prompt_tokens = None
 
@@ -217,11 +227,11 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
         scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
     ):
-        if cur_step_action is not None:
+        if state.cur_step_action is not None:
             num_scheduled_tokens = next(
                 iter(scheduler_output.num_scheduled_tokens.values())
             )
-            assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
+            assert num_scheduled_tokens == state.cur_step_action.num_scheduled_tokens
         mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
         mamba_group_id = mamba_group_ids[0]
         mamba_layer_name = self.kv_cache_config.kv_cache_groups[
@@ -251,7 +261,9 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 # NOTE (tdoublep) with async scheduling, the scheduler does not have an
                 # accurate measure of the number of computed tokens; we need to subtract
                 # the number of reject tokens from the previous timestep.
-                num_computed_tokens -= num_speculative_tokens + 1 - num_accepted_tokens
+                num_computed_tokens -= (
+                    num_speculative_tokens + 1 - state.num_accepted_tokens
+                )
             if (
                 num_computed_tokens // BLOCK_SIZE
                 > last_num_computed_tokens // BLOCK_SIZE
@@ -267,7 +279,7 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                     kv_cache = self.compilation_config.static_forward_context[
                         mamba_layer_name
                     ].kv_cache
-                    mamba_kv_cache_dict[
+                    state.mamba_kv_cache_dict[
                         num_computed_tokens - num_computed_tokens % BLOCK_SIZE
                     ] = (
                         kv_cache[0][block_id].clone(),
@@ -280,9 +292,9 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
 
         ret = original_execute_model_fn(self, scheduler_output, intermediate_tensors)
 
-        if cur_step_action is not None:
+        if state.cur_step_action is not None:
             assert (
-                cur_step_action.num_computed_tokens_start
+                state.cur_step_action.num_computed_tokens_start
                 == self.input_batch.num_computed_tokens_cpu[0].item()
             )
 
@@ -295,6 +307,7 @@ def get_fake_process_mamba_fn(
     original_preprocess_mamba_fn: Callable,
     original_post_process_mamba_fn: Callable,
     original_copy_fn: Callable,
+    state: RuntimeState,
 ):
     copy_info: tuple[list[int], list[int], list[int]] | None = None
 
@@ -352,9 +365,9 @@ def get_fake_process_mamba_fn(
             mamba_state_copy_funcs,
             copy_bufs,
         )
-        if cur_step_action is not None:
+        if state.cur_step_action is not None:
             check_copy_info(
-                cur_step_action.preprocess_copy_idx,
+                state.cur_step_action.preprocess_copy_idx,
                 kv_cache_config,
                 forward_context,
                 input_batch,
@@ -383,9 +396,9 @@ def get_fake_process_mamba_fn(
             mamba_state_copy_funcs,
             copy_bufs,
         )
-        if cur_step_action is not None:
+        if state.cur_step_action is not None:
             check_copy_info(
-                cur_step_action.postprocess_copy_idx,
+                state.cur_step_action.postprocess_copy_idx,
                 kv_cache_config,
                 forward_context,
                 input_batch,
@@ -405,18 +418,19 @@ def get_fake_process_mamba_fn(
     return fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn
 
 
-def run_ref_mamba_state_in_subprocess() -> None:
+def run_ref_mamba_state_in_subprocess(ref_path: str) -> None:
     ctx = mp.get_context("spawn")
-    proc = ctx.Process(target=_run_ref_mamba_state_worker)
+    proc = ctx.Process(target=_run_ref_mamba_state_worker, args=(ref_path,))
     proc.start()
     proc.join(timeout=600)
     if proc.exitcode != 0:
         raise RuntimeError(f"Ref mamba state process exited with code {proc.exitcode}.")
 
 
-def _run_ref_mamba_state_worker():
+def _run_ref_mamba_state_worker(ref_path: str):
     try:
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        state = RuntimeState()
         num_generated_tokens = 8000
         num_prompt_tokens = 500
         sampling_params = SamplingParams(
@@ -424,9 +438,11 @@ def _run_ref_mamba_state_worker():
         )
         prompt_dataset = datasets.load_dataset("heheda/a_long_article")
         full_prompt = prompt_dataset["train"][0]["text"]
-        fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
+        fake_execute_model_fn = get_fake_execute_model_fn(
+            GPUModelRunner.execute_model, state
+        )
         GPUModelRunner.execute_model = fake_execute_model_fn
-        fake_sample_fn = get_fake_sample_fn()
+        fake_sample_fn = get_fake_sample_fn(state)
         GPUModelRunner._sample = fake_sample_fn
         engine = LLM(
             model=MODEL,
@@ -434,23 +450,23 @@ def _run_ref_mamba_state_worker():
             hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
             seed=42,
         )
-        global prompt_token_ids
-        prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
-        print(f"Token IDs length: {len(prompt_token_ids)}")
+        state.prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
+        print(f"Token IDs length: {len(state.prompt_token_ids)}")
 
         _outputs = engine.generate(
-            [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
+            [
+                TokensPrompt(
+                    prompt_token_ids=state.prompt_token_ids[:num_prompt_tokens]
+                )
+            ],
             sampling_params,
         )
-        # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
-        # check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
-        # torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
         cpu_state_ref = {
             key: tuple(tensor.detach().cpu() for tensor in tensors)
-            for key, tensors in mamba_kv_cache_dict.items()
+            for key, tensors in state.mamba_kv_cache_dict.items()
         }
-        torch.save(cpu_state_ref, "mamba_kv_cache_dict_ref.pth")
-        mamba_kv_cache_dict.clear()
+        torch.save(cpu_state_ref, ref_path)
+        state.mamba_kv_cache_dict.clear()
         del engine
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
@@ -494,24 +510,28 @@ class TestConfig:
     step_actions: list[StepAction]
 
 
-def apply_patch(monkeypatch: pytest.MonkeyPatch):
+def apply_patch(monkeypatch: pytest.MonkeyPatch, state: RuntimeState):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    fake_sample_fn = get_fake_sample_fn()
+    fake_sample_fn = get_fake_sample_fn(state)
     monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
 
-    fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn()
+    fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn(state)
     monkeypatch.setattr(
         GPUModelRunner, "propose_draft_token_ids", fake_propose_draft_token_ids_fn
     )
 
-    fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
+    fake_execute_model_fn = get_fake_execute_model_fn(
+        GPUModelRunner.execute_model, state
+    )
     monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
 
-    fake_step_action_fn = get_fake_step_action_fn(InprocClient.get_output)
+    fake_step_action_fn = get_fake_step_action_fn(InprocClient.get_output, state)
     monkeypatch.setattr(InprocClient, "get_output", fake_step_action_fn)
 
-    fake_allocate_slots_fn = get_fake_allocate_slots_fn(KVCacheManager.allocate_slots)
+    fake_allocate_slots_fn = get_fake_allocate_slots_fn(
+        KVCacheManager.allocate_slots, state
+    )
     monkeypatch.setattr(KVCacheManager, "allocate_slots", fake_allocate_slots_fn)
 
     fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn = (
@@ -519,6 +539,7 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
             mamba_utils.preprocess_mamba,
             mamba_utils.postprocess_mamba,
             mamba_utils.do_mamba_copy_block,
+            state,
         )
     )
     monkeypatch.setattr(mamba_utils, "preprocess_mamba", fake_preprocess_mamba_fn)
@@ -527,9 +548,17 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
 
 
 @create_new_process_for_each_test()
-def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
-    run_ref_mamba_state_in_subprocess()
-    apply_patch(monkeypatch)
+def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    if current_platform.is_rocm() and not current_platform.supports_fp8():
+        pytest.skip(
+            f"{MODEL} uses FP8 MoE weights, but this ROCm platform does not "
+            "have a supported FP8 MoE backend."
+        )
+
+    ref_path = tmp_path / "mamba_kv_cache_dict_ref.pth"
+    run_ref_mamba_state_in_subprocess(str(ref_path))
+    state = RuntimeState()
+    apply_patch(monkeypatch, state)
     prompt_dataset = datasets.load_dataset("heheda/a_long_article")
     full_prompt = prompt_dataset["train"][0]["text"]
     tests = {
@@ -776,20 +805,17 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
         seed=42,
     )
-    global prompt_token_ids
-    prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
-    print(f"Token IDs length: {len(prompt_token_ids)}")
+    state.prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
+    print(f"Token IDs length: {len(state.prompt_token_ids)}")
     for test_case_name, test_config in tests.items():
         print(f"Running test case: {test_case_name}")
         num_generated_tokens = test_config.num_generated_tokens
         num_prompt_tokens = test_config.num_prompt_tokens
-        global num_accepted_tokens
-        num_accepted_tokens = test_config.num_accepted_tokens
+        state.num_accepted_tokens = test_config.num_accepted_tokens
         sampling_params = SamplingParams(
             temperature=0.0, max_tokens=num_generated_tokens
         )
-        global cur_step_action_idx
-        cur_step_action_idx = 0
+        state.cur_step_action_idx = 0
         for step_action_prev, step_action_next in zip(
             test_config.step_actions[:-1], test_config.step_actions[1:]
         ):
@@ -800,10 +826,13 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                 prev_block_ids = step_action_prev.kv_cache_block_ids
                 if prev_block_ids is not None:
                     step_action_next.kv_cache_block_ids = prev_block_ids.copy()
-        global step_actions
-        step_actions = test_config.step_actions
+        state.step_actions = test_config.step_actions
         _ = engine.generate(
-            [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
+            [
+                TokensPrompt(
+                    prompt_token_ids=state.prompt_token_ids[:num_prompt_tokens]
+                )
+            ],
             sampling_params,
         )
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
@@ -813,9 +842,11 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             for action in test_config.step_actions
             if action.postprocess_copy_idx and action.postprocess_copy_idx[0] != -1
         ]
-        mamba_state_ref = torch.load("mamba_kv_cache_dict_ref.pth")
-        check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
-        mamba_kv_cache_dict.clear()
+        mamba_state_ref = torch.load(ref_path)
+        check_mamba_state_equal(
+            mamba_state_ref, state.mamba_kv_cache_dict, keys_to_check
+        )
+        state.mamba_kv_cache_dict.clear()
     del engine
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()

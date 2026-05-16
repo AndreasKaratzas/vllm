@@ -336,6 +336,15 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "Remote model code indexes "
+                '`ROPE_INIT_FUNCTIONS["default"]`, but Transformers 5.x no '
+                "longer defines the default RoPE key; after shimming that key, "
+                "the HF reference generation still produces invalid outputs."
+            )
+        },
     ),
     "InternLMForCausalLM": _HfExamplesInfo(
         "internlm/internlm-chat-7b", trust_remote_code=True
@@ -419,7 +428,18 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
     "MiniCPM4ForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM4.1-8B", trust_remote_code=True
+        "openbmb/MiniCPM4.1-8B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "Remote model code imports the removed "
+                "`transformers.utils.import_utils.is_torch_fx_available` "
+                "helper; after shimming it, the HF reference path still fails "
+                "because the config requests Flash Attention 2 for a class "
+                "that does not declare Flash Attention 2 support."
+            )
+        },
     ),
     "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(

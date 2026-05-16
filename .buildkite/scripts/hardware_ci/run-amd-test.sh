@@ -44,7 +44,21 @@ cleanup_docker() {
   fi
   echo "Docker root directory: $docker_root"
 
-  disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
+  docker_root_for_df="$docker_root"
+  while [ ! -e "$docker_root_for_df" ] && [ "$docker_root_for_df" != "/" ]; do
+    docker_root_for_df=$(dirname "$docker_root_for_df")
+  done
+
+  if [ "$docker_root_for_df" != "$docker_root" ]; then
+    echo "Docker root path does not exist on host; using $docker_root_for_df for disk usage."
+  fi
+
+  disk_usage=$(df -P "$docker_root_for_df" 2>/dev/null | tail -1 | awk '{print $5}' | sed 's/%//')
+  if ! [[ "$disk_usage" =~ ^[0-9]+$ ]]; then
+    echo "Unable to determine Docker disk usage. Skipping Docker cleanup."
+    return
+  fi
+
   threshold=70
   if [ "$disk_usage" -gt "$threshold" ]; then
     echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
@@ -66,6 +80,277 @@ cleanup_network() {
   if docker network ls | grep -q docker-net; then
     docker network rm docker-net || true
   fi
+}
+
+assigned_rocm_cards() {
+  local render_devices="${BUILDKITE_AGENT_META_DATA_RENDER_DEVICES:-}"
+  if [[ -z "$render_devices" ]]; then
+    return
+  fi
+
+  python3 - "$render_devices" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+
+render_devices = sorted(set(re.findall(r"/dev/dri/(renderD[0-9]+)", sys.argv[1])))
+if not render_devices:
+    sys.exit(0)
+
+render_unique_ids = set()
+for render_dev in render_devices:
+    unique_id_path = f"/sys/class/drm/{render_dev}/device/unique_id"
+    try:
+        with open(unique_id_path, encoding="utf-8") as f:
+            unique_id = f.read().strip().lower()
+    except OSError:
+        continue
+    if unique_id:
+        render_unique_ids.add("0x" + unique_id.lstrip("0x"))
+
+try:
+    result = subprocess.run(
+        ["rocm-smi", "--showuniqueid", "--json"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    cards = json.loads(result.stdout)
+except Exception:
+    sys.exit(0)
+
+for card, values in sorted(cards.items()):
+    unique_id = str(values.get("Unique ID", "")).lower()
+    if unique_id in render_unique_ids:
+        print(card)
+PY
+}
+
+assigned_gpu_vram_usage() {
+  local cards="$1"
+  if [[ -z "$cards" ]]; then
+    return 1
+  fi
+
+  python3 - "$cards" <<'PY'
+import json
+import subprocess
+import sys
+
+cards = set(sys.argv[1].split())
+try:
+    result = subprocess.run(
+        ["rocm-smi", "--showmemuse", "--json"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    mem = json.loads(result.stdout)
+except Exception:
+    sys.exit(1)
+
+usages = []
+for card in sorted(cards):
+    value = mem.get(card, {}).get("GPU Memory Allocated (VRAM%)")
+    try:
+        usages.append(int(str(value).strip()))
+    except (TypeError, ValueError):
+        pass
+
+if not usages:
+    sys.exit(1)
+
+print(max(usages))
+PY
+}
+
+assigned_gpu_pids() {
+  local cards="$1"
+  if [[ -z "$cards" ]]; then
+    return 1
+  fi
+
+  python3 - "$cards" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+
+card_ids = {
+    card.removeprefix("card")
+    for card in sys.argv[1].split()
+    if card.removeprefix("card").isdigit()
+}
+if not card_ids:
+    sys.exit(0)
+
+current_pids = {os.getpid(), os.getppid()}
+direct_matches: list[int] = []
+busy_pids: list[int] = []
+seen: set[int] = set()
+
+
+def record_pid(pid: int, proc_gpus: str, vram_used: int) -> None:
+    if pid in current_pids or pid in seen:
+        return
+    if vram_used <= 0:
+        return
+
+    seen.add(pid)
+    busy_pids.append(pid)
+    proc_cards = set(re.findall(r"[0-9]+", proc_gpus))
+    if proc_cards & card_ids:
+        direct_matches.append(pid)
+
+
+try:
+    result = subprocess.run(
+        ["rocm-smi", "--showpids", "--json"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    data = json.loads(result.stdout)
+except Exception:
+    data = {}
+
+for key, raw_value in data.get("system", {}).items():
+    match = re.fullmatch(r"PID([0-9]+)", str(key))
+    if match is None:
+        continue
+    fields = [field.strip() for field in str(raw_value).split(",")]
+    if len(fields) < 3:
+        continue
+    try:
+        vram_used = int(fields[2])
+    except ValueError:
+        vram_used = 0
+    record_pid(int(match.group(1)), fields[1], vram_used)
+
+# Some ROCm-SMI builds return "WARNING: No JSON data to report" for
+# `--showpids --json`. Parse the plain text table as a fallback so the idle
+# gate can still clean stale KFD processes before starting a test container.
+if not seen:
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showpids"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        result = None
+
+    if result is not None:
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 5 or not fields[0].isdigit():
+                continue
+            try:
+                vram_used = int(fields[3])
+            except ValueError:
+                continue
+            record_pid(int(fields[0]), fields[2], vram_used)
+
+if direct_matches:
+    print(*direct_matches, sep="\n")
+    sys.exit(0)
+
+# Some ROCm-SMI versions report the process table GPU column using a KFD node
+# id that does not match the JSON card key. For a one-card job with exactly one
+# busy KFD process, that process is still the contaminated assigned device.
+if len(card_ids) == 1 and len(busy_pids) == 1:
+    print(busy_pids[0])
+PY
+}
+
+cleanup_assigned_gpu_processes() {
+  local cards="$1"
+  local pids
+  pids="$(assigned_gpu_pids "$cards" | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)"
+  if [[ -z "$pids" ]]; then
+    echo "No KFD processes with VRAM allocations found on assigned ROCm cards."
+    return 1
+  fi
+
+  echo "Attempting to terminate KFD process(es) on assigned ROCm cards: ${pids}"
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null || true
+  sleep "${VLLM_CI_GPU_IDLE_TERM_GRACE_SECONDS:-10}"
+
+  local alive=()
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      alive+=("$pid")
+    fi
+  done
+
+  if [[ ${#alive[@]} -gt 0 ]]; then
+    echo "KFD process(es) still alive after SIGTERM, sending SIGKILL: ${alive[*]}"
+    kill -KILL "${alive[@]}" 2>/dev/null || true
+  fi
+}
+
+wait_for_assigned_gpus_idle() {
+  local cards
+  cards="$(assigned_rocm_cards | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  if [[ -z "$cards" ]]; then
+    if [[ -n "${BUILDKITE_AGENT_META_DATA_RENDER_DEVICES:-}" ]]; then
+      echo "Could not map assigned render devices to ROCm cards."
+      echo "Render devices: ${BUILDKITE_AGENT_META_DATA_RENDER_DEVICES}"
+      return 1
+    fi
+    echo "No assigned render-device metadata; skipping GPU idle wait."
+    return
+  fi
+
+  local threshold="${VLLM_CI_GPU_IDLE_VRAM_THRESHOLD:-10}"
+  local timeout="${VLLM_CI_GPU_IDLE_WAIT_SECONDS:-900}"
+  local interval="${VLLM_CI_GPU_IDLE_POLL_SECONDS:-15}"
+  local start
+  start=$(date +%s)
+
+  echo "Waiting for assigned ROCm cards to be idle: ${cards} (VRAM <= ${threshold}%)."
+  while true; do
+    local usage
+    usage="$(assigned_gpu_vram_usage "$cards" || true)"
+    if [[ "$usage" =~ ^[0-9]+$ ]] && [ "$usage" -le "$threshold" ]; then
+      echo "Assigned ROCm cards are idle enough: max VRAM ${usage}%."
+      return
+    fi
+
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$((now - start))
+    if [ "$elapsed" -ge "$timeout" ]; then
+      echo "Assigned ROCm cards did not become idle within ${timeout}s; max VRAM ${usage:-unknown}%."
+      rocm-smi --showmemuse || true
+      rocm-smi --showpids || true
+
+      if [[ "${VLLM_CI_GPU_IDLE_KILL_BUSY_PROCS:-1}" == "1" ]]; then
+        cleanup_assigned_gpu_processes "$cards"
+        usage="$(assigned_gpu_vram_usage "$cards" || true)"
+        if [[ "$usage" =~ ^[0-9]+$ ]] && [ "$usage" -le "$threshold" ]; then
+          echo "Assigned ROCm cards became idle after KFD process cleanup: max VRAM ${usage}%."
+          return
+        fi
+        echo "Assigned ROCm cards are still busy after cleanup: max VRAM ${usage:-unknown}%."
+        rocm-smi --showmemuse || true
+        rocm-smi --showpids || true
+      fi
+      return 1
+    fi
+
+    echo "Assigned ROCm cards still busy: max VRAM ${usage:-unknown}% (${elapsed}s/${timeout}s)."
+    sleep "$interval"
+  done
 }
 
 is_multi_node() {
@@ -433,6 +718,11 @@ else
   echo "No RDMA devices found on host, RDMA tests will be skipped"
 fi
 
+if ! wait_for_assigned_gpus_idle; then
+  echo "Assigned ROCm cards are still busy; refusing to start tests on contaminated GPUs."
+  exit 1
+fi
+
 # --- Route: multi-node vs single-node ---
 if is_multi_node "$commands"; then
   echo "--- Multi-node job detected"
@@ -481,13 +771,14 @@ else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
 
+  # Let the EXIT trap own container cleanup. With docker run --rm, an external
+  # cleanup race can make docker report "No such container" after tests pass.
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
     --shm-size=16gb \
     --group-add "$render_gid" \
-    --rm \
     -e HF_TOKEN \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \

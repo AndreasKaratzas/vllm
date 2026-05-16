@@ -43,6 +43,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _get_expert_routing_tables(
+    layer: torch.nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    if hasattr(layer, "_expert_routing_tables"):
+        return layer._expert_routing_tables()
+    return layer._maybe_init_expert_routing_tables()
+
+
 # --8<-- [start:unquantized_fused_moe]
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
@@ -198,8 +206,27 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 moe_config=self.moe,
                 backend=self.unquantized_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
+                routing_tables=_get_expert_routing_tables(layer),
             )
+
+    def rebuild_moe_kernel_after_topology_change(
+        self,
+        layer: torch.nn.Module,
+    ) -> bool:
+        if self.moe_kernel is None or self.is_monolithic:
+            return False
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_unquantized_moe_kernel(
+            quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            backend=self.unquantized_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=_get_expert_routing_tables(layer),
+        )
+        return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)

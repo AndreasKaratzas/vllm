@@ -46,7 +46,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
+from vllm.utils.mem_utils import (
+    MemoryProfilingResult,
+    MemorySnapshot,
+    format_gib,
+    memory_profiling,
+)
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -65,6 +70,42 @@ from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
+
+def _finalize_memory_profiling_result(
+    init_snapshot: MemorySnapshot,
+    profile_result: MemoryProfilingResult,
+) -> int:
+    """Finalize non-KV memory accounting after worker profiling."""
+    free_gpu_memory = profile_result.after_profile.free_memory
+    if free_gpu_memory > init_snapshot.free_memory:
+        released_memory = free_gpu_memory - init_snapshot.free_memory
+        original_non_torch_increase = profile_result.non_torch_increase
+        profile_result.non_torch_increase = (
+            max(profile_result.non_torch_increase, 0) + released_memory
+        )
+        # NOTE(woosuk): Here we assume that the other processes using the same
+        # GPU did not change their memory usage during the profiling.
+        logger.warning(
+            "Free memory on device %s increased during memory profiling "
+            "(initial: %s GiB, current: %s GiB). This can happen when "
+            "the runtime or another process releases memory during warmup. "
+            "Reserving the %s GiB increase as non-KV memory to keep KV "
+            "cache sizing conservative. Original non-torch increase: %s GiB.",
+            init_snapshot.device_,
+            format_gib(init_snapshot.free_memory),
+            format_gib(free_gpu_memory),
+            format_gib(released_memory),
+            format_gib(original_non_torch_increase),
+        )
+
+    profile_result.non_kv_cache_memory = (
+        profile_result.non_torch_increase
+        + profile_result.torch_peak_increase
+        + profile_result.weights_memory
+    )
+    return free_gpu_memory
+
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -410,10 +451,8 @@ class Worker(WorkerBase):
         profile_result.torch_peak_increase = (
             profile_torch_peak - profile_result.before_profile.torch_peak
         )
-        profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase
-            + profile_result.torch_peak_increase
-            + profile_result.weights_memory
+        free_gpu_memory = _finalize_memory_profiling_result(
+            self.init_snapshot, profile_result
         )
 
         # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
@@ -428,18 +467,6 @@ class Worker(WorkerBase):
         self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        free_gpu_memory = profile_result.after_profile.free_memory
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory >= free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {format_gib(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
-        )
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory

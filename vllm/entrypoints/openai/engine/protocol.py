@@ -141,6 +141,16 @@ class StructuralTagResponseFormat(OpenAIBaseModel):
     type: Literal["structural_tag"]
     format: Any
 
+    @model_validator(mode="after")
+    def validate_format(self) -> "StructuralTagResponseFormat":
+        try:
+            from xgrammar.structural_tag import StructuralTag
+
+            StructuralTag.model_validate({"type": self.type, "format": self.format})
+        except Exception as e:
+            raise ValueError("Invalid structural tag response_format.") from e
+        return self
+
 
 AnyStructuralTagResponseFormat: TypeAlias = (
     LegacyStructuralTagResponseFormat | StructuralTagResponseFormat

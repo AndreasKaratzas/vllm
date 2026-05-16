@@ -153,6 +153,7 @@ def compute_tile_loop_bounds(
     SLIDING_WINDOW: tl.constexpr,
     USE_MM_PREFIX: tl.constexpr,
     IS_3D: tl.constexpr,
+    CAUSAL: tl.constexpr,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
 ):
@@ -173,17 +174,21 @@ def compute_tile_loop_bounds(
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
-    max_seq_prefix_len = (
-        context_len
-        + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
-        + 1
-    )
+    if CAUSAL:
+        max_seq_prefix_len = (
+            context_len
+            + q_block_local_idx * BLOCK_Q
+            + (BLOCK_M - 1) // num_queries_per_kv
+            + 1
+        )
+    else:
+        max_seq_prefix_len = seq_len
+
     if USE_MM_PREFIX:
         # image bidirectional attention ranges require a full range
         # including q_block padding to make sure doc mask is correct
         max_seq_prefix_len = tl.maximum(max_seq_prefix_len, seq_len)
-    else:
+    elif CAUSAL:
         max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
 
     num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
@@ -193,7 +198,7 @@ def compute_tile_loop_bounds(
     tile_start = 0
     tile_end = num_tiles
     # TODO(Isotr0py): sliding window pruning with image bidirectional mask
-    if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
+    if CAUSAL and SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
         # Query rows covered by this Q-block
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
@@ -266,6 +271,7 @@ def compute_kv_seq_mask(
     SLIDING_WINDOW: tl.constexpr,
     USE_MM_PREFIX: tl.constexpr,
     MAX_MM_RANGES: tl.constexpr,
+    CAUSAL: tl.constexpr,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
 ):
@@ -280,20 +286,25 @@ def compute_kv_seq_mask(
     are non-default — the launcher zeros ``CHUNK_LOOKBACK`` whenever
     sliding window is disabled.
     """
-    # Compute attention mask: causal by default (key <= query)
-    seq_mask = seq_offset[None, :] <= query_abs_pos
+    # Compute attention mask: causal by default (key <= query), or
+    # unmasked for encoder-decoder cross-attention.
+    if CAUSAL:
+        seq_mask = seq_offset[None, :] <= query_abs_pos
+    else:
+        seq_mask = seq_offset[None, :] >= 0
 
-    # Apply sliding window / chunked attention to base mask
+    # Apply decoder-only sliding window / chunked attention to the base mask
     # BEFORE mm_prefix OR.
     # Order must match FlexAttention:
     #   (causal AND sliding_window) OR mm_prefix
-    if CHUNK_LOOKBACK > -1:
-        seq_mask = seq_mask & (
-            (query_abs_pos // CHUNK_SIZE - seq_offset[None, :] // CHUNK_SIZE)
-            <= CHUNK_LOOKBACK
-        )
-    elif SLIDING_WINDOW > 0:
-        seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+    if CAUSAL:
+        if CHUNK_LOOKBACK > -1:
+            seq_mask = seq_mask & (
+                (query_abs_pos // CHUNK_SIZE - seq_offset[None, :] // CHUNK_SIZE)
+                <= CHUNK_LOOKBACK
+            )
+        elif SLIDING_WINDOW > 0:
+            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
     # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
     # Applied AFTER sliding window so mm_prefix ranges override SW restriction.

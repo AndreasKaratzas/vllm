@@ -124,7 +124,8 @@ def rocm_unquantized_gemm_impl(
 ) -> torch.Tensor:
     from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
 
-    n = x.numel() // x.size(-1)
+    x_view = x.reshape(-1, x.size(-1))
+    n = x_view.shape[0]
     m = weight.shape[0]
     k = weight.shape[1]
 
@@ -161,7 +162,8 @@ def rocm_unquantized_gemm_impl(
     )
 
     if use_skinny_reduce_counting:
-        return ops.wvSplitKrc(x, weight, cu_count, bias)
+        out = ops.wvSplitKrc(x_view, weight, cu_count, bias)
+        return out.reshape(*x.shape[:-1], weight.shape[0])
 
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
@@ -176,7 +178,6 @@ def rocm_unquantized_gemm_impl(
     )
 
     if use_skinny:
-        x_view = x.reshape(-1, x.size(-1))
         if m > 8 and 0 < n <= 4:
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)

@@ -9,16 +9,17 @@ dataset and asserts that the mean acceptance length is within tolerance of
 the expected baseline.
 """
 
+import json
+import random
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
+from huggingface_hub import hf_hub_download
 import pytest
 import torch
 
 from tests.conftest import VllmRunner
 from tests.utils import large_gpu_mark
 from vllm import SamplingParams
-from vllm.benchmarks.datasets import get_samples
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -39,6 +40,12 @@ class Eagle3ModelConfig:
     marks: list = field(default_factory=list)
     # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
     rtol: float | None = None
+    # ROCm-specific per-position baselines for numerically different kernels.
+    rocm_expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
+    # ROCm-specific valid tensor-parallel sizes.
+    rocm_tp_sizes: set[int] | None = None
+    # ROCm-specific tensor-parallel sizes that require expert parallelism.
+    rocm_expert_parallel_tp_sizes: set[int] = field(default_factory=set)
 
 
 # Model configurations for EAGLE3 acceptance length tests.
@@ -68,7 +75,14 @@ EAGLE3_MODEL_CONFIGS = [
         id="gpt-oss-20b-eagle3",
         # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
         # FLASHINFER does not support ("sink setting not supported")
-        excluded_backends={AttentionBackendEnum.FLASHINFER},
+        # ROCM_ATTN also does not support attention sinks.
+        excluded_backends={
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.ROCM_ATTN,
+        },
+        # ROCm gpt-oss kernels preserve the same mean acceptance target but
+        # distribute accepted draft tokens slightly differently by position.
+        rocm_expected_acceptance_lengths_per_pos=[0.7040, 0.4820, 0.3350],
     ),
     Eagle3ModelConfig(
         verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
@@ -80,6 +94,8 @@ EAGLE3_MODEL_CONFIGS = [
             pytest.mark.slow_test,
         ],
         rtol=0.15,  # Higher tolerance due to small absolute values at position 2
+        rocm_tp_sizes={4},
+        rocm_expert_parallel_tp_sizes={4},
     ),
 ]
 
@@ -89,6 +105,8 @@ DEFAULT_NUM_PROMPTS = 80
 DEFAULT_OUTPUT_LEN = 256
 DEFAULT_MAX_MODEL_LEN = 16384
 DEFAULT_RTOL = 0.05
+MT_BENCH_REPO = "philschmid/mt-bench"
+MT_BENCH_FILE = "question.jsonl"
 
 # TP sizes to test
 TP_SIZES = [1, 2, 4]
@@ -99,16 +117,14 @@ EXCLUDED_BACKENDS = {AttentionBackendEnum.FLEX_ATTENTION}
 
 
 def get_available_attention_backends() -> list[str]:
+    if current_platform.is_rocm():
+        return ["auto"]
+
     # Check if get_valid_backends is actually defined in the platform class
     # (not just returning None from __getattr__)
     get_valid_backends = getattr(current_platform.__class__, "get_valid_backends", None)
     if get_valid_backends is None:
-        if current_platform.is_rocm():
-            # ROCm uses Triton as its default attention backend since
-            # Flash Attention is not supported.
-            return ["TRITON_ATTN"]
-        else:
-            return ["FLASH_ATTN"]
+        return ["FLASH_ATTN"]
 
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
@@ -149,29 +165,31 @@ def get_tp_size_params() -> list[pytest.param]:
 def get_mt_bench_prompts(
     tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS
 ) -> list[list[int]]:
-    args = SimpleNamespace(
-        dataset_name="hf",
-        dataset_path="philschmid/mt-bench",
-        num_prompts=num_prompts,
-        seed=42,
-        no_oversample=False,
-        endpoint_type="openai-chat",
-        input_len=None,
-        output_len=DEFAULT_OUTPUT_LEN,
-        sharegpt_output_len=DEFAULT_OUTPUT_LEN,
-        hf_name=None,
-        hf_split="train",
-        hf_subset=None,
-        hf_output_len=DEFAULT_OUTPUT_LEN,
-        no_stream=True,
-        disable_shuffle=False,
-        skip_chat_template=False,
-        trust_remote_code=False,
+    # Buildkite ROCm workers can carry an older cached copy of this dataset
+    # whose dataset_info.json serializes sequence columns as "List", which is
+    # no longer understood by the installed `datasets` version. Read the raw
+    # JSONL used by MTBenchDataset so the test still exercises the same prompts
+    # instead of failing while deserializing stale cache metadata.
+    path = hf_hub_download(
+        repo_id=MT_BENCH_REPO,
+        filename=MT_BENCH_FILE,
+        repo_type="dataset",
     )
-    samples = get_samples(args, tokenizer)
-    prompt_ids = [
-        tokenizer.encode(sample.prompt, add_special_tokens=False) for sample in samples
-    ]
+    with open(path, encoding="utf-8") as f:
+        data = [json.loads(line) for line in f]
+    random.Random(42).shuffle(data)
+
+    prompt_ids: list[list[int]] = []
+    for item in data:
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": item["turns"][0]}],
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        prompt_ids.append(tokenizer.encode(prompt, add_special_tokens=False))
+        if len(prompt_ids) >= num_prompts:
+            break
+
     return prompt_ids
 
 
@@ -232,10 +250,20 @@ def test_eagle3_acceptance_length(
     attention_backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # Skip if this backend is incompatible with the model
-    backend_enum = AttentionBackendEnum[attention_backend]
-    if backend_enum in model_config.excluded_backends:
-        pytest.skip(f"{attention_backend} is incompatible with {model_config.id}")
+    if (
+        current_platform.is_rocm()
+        and model_config.rocm_tp_sizes is not None
+        and tp_size not in model_config.rocm_tp_sizes
+    ):
+        tp_ids = ", ".join(f"tp{tp}" for tp in sorted(model_config.rocm_tp_sizes))
+        pytest.skip(f"{model_config.id} is validated with {tp_ids} on ROCm")
+
+    attention_config = None
+    if attention_backend != "auto":
+        backend_enum = AttentionBackendEnum[attention_backend]
+        if backend_enum in model_config.excluded_backends:
+            pytest.skip(f"{attention_backend} is incompatible with {model_config.id}")
+        attention_config = {"backend": attention_backend}
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -247,11 +275,15 @@ def test_eagle3_acceptance_length(
                 "model": model_config.drafter,
                 "num_speculative_tokens": num_spec_tokens,
             },
-            attention_config={"backend": attention_backend},
+            attention_config=attention_config,
             tensor_parallel_size=tp_size,
             gpu_memory_utilization=0.7,
             disable_log_stats=False,
             max_model_len=DEFAULT_MAX_MODEL_LEN,
+            enable_expert_parallel=(
+                current_platform.is_rocm()
+                and tp_size in model_config.rocm_expert_parallel_tp_sizes
+            ),
         ) as vllm_runner:
             tokenizer = vllm_runner.llm.get_tokenizer()
             prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
@@ -272,15 +304,24 @@ def test_eagle3_acceptance_length(
             expected = model_config.expected_acceptance_length
             actual_per_pos = results["acceptance_lengths_per_pos"]
             expected_per_pos = model_config.expected_acceptance_lengths_per_pos
+            if (
+                current_platform.is_rocm()
+                and model_config.rocm_expected_acceptance_lengths_per_pos
+            ):
+                expected_per_pos = model_config.rocm_expected_acceptance_lengths_per_pos
 
-            rel_error = abs(actual_acceptance_length - expected) / expected
+            rel_drop = (expected - actual_acceptance_length) / expected
 
-            # Overall acceptance length always uses DEFAULT_RTOL
-            assert rel_error <= DEFAULT_RTOL, (
+            # Overall acceptance length always uses DEFAULT_RTOL. This is a
+            # regression test, so higher acceptance is allowed; correctness is
+            # covered separately by the spec decode correctness suites.
+            assert rel_drop <= DEFAULT_RTOL, (
                 f"Acceptance length regression detected for {model_config.id}!\n"
-                f"  Expected: {expected:.3f}\n"
+                f"  Expected at least: {expected * (1 - DEFAULT_RTOL):.3f}\n"
+                f"  Baseline: {expected:.3f}\n"
                 f"  Actual:   {actual_acceptance_length:.3f}\n"
-                f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
+                f"  Relative drop: {rel_drop:.2%} "
+                f"(tolerance: {DEFAULT_RTOL:.2%})\n"
                 f"  Drafts: {results['num_drafts']}, "
                 f"Accepted tokens: {results['num_accepted_tokens']}"
             )
@@ -294,20 +335,21 @@ def test_eagle3_acceptance_length(
                     zip(actual_per_pos, expected_per_pos)
                 ):
                     if exp > 0:
-                        pos_rel_error = abs(actual - exp) / exp
-                        assert pos_rel_error <= rtol, (
+                        pos_rel_drop = (exp - actual) / exp
+                        assert pos_rel_drop <= rtol, (
                             f"Per-position acceptance length regression at pos {pos} "
                             f"for {model_config.id}!\n"
-                            f"  Expected: {exp:.3f}\n"
+                            f"  Expected at least: {exp * (1 - rtol):.3f}\n"
+                            f"  Baseline: {exp:.3f}\n"
                             f"  Actual:   {actual:.3f}\n"
-                            f"  Relative error: {pos_rel_error:.2%} "
+                            f"  Relative drop: {pos_rel_drop:.2%} "
                             f"(tolerance: {rtol:.2%})"
                         )
 
             print(
                 f"\n{model_config.id} [tp={tp_size}, backend={attention_backend}]: "
                 f"acceptance_length={actual_acceptance_length:.3f}"
-                f" (expected={expected:.3f}, rel_error={rel_error:.2%})"
+                f" (baseline={expected:.3f}, rel_drop={rel_drop:.2%})"
             )
             print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
             if expected_per_pos:

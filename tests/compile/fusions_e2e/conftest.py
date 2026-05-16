@@ -8,6 +8,7 @@ import regex as re
 
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
+from vllm.platforms import current_platform
 
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
 
@@ -114,6 +115,8 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         model_kwargs = {**attn_backend.model_kwargs, **model_kwargs}
         model_kwargs["attention_config"] = {"backend": attn_backend.backend.name}
         model_kwargs["tensor_parallel_size"] = tp_size
+        if current_platform.is_rocm() and "ar_rms_fusion" in matches_check:
+            model_kwargs.setdefault("disable_custom_all_reduce", False)
 
         # Cap warmup memory: tests use small max_model_len (1024) but the
         # engine default max_num_batched_tokens is 16384. Warming up large
@@ -165,6 +168,18 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         # Now check the matches
         for match_name in matches_check:
             log_matches = list(int(ms) for ms in log_matches_dict[match_name])
+            expected_matches = getattr(matches, match_name)
+
+            if match_name == "ar_rms_fusion" and use_aiter:
+                actual_match = match_table.get("rocm_aiter_allreduce_fusion_pass", 0)
+                # AITER AR+RMS uses VllmFusionPatternMatcherPass match tables
+                # rather than the legacy per-file "Replaced N patterns" logs.
+                n_expected = tp_size * num_compile_ranges
+                assert actual_match == expected_matches * n_expected, (
+                    f"Could not find {expected_matches * n_expected} "
+                    f"{match_name} (found {actual_match})."
+                )
+                continue
 
             # AR+RMS skips the largest range; SP skips the smallest.
             # When both are enabled, AR+RMS activation count is
@@ -198,8 +213,6 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"Could not find {n_expected} {match_name} "
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"
                 )
-
-            expected_matches = getattr(matches, match_name)
 
             if match_name == "rms_quant_fusion" and "ar_rms_fusion" in matches_check:
                 # AR+rms+quant takes precedence over rms+quant if activated.

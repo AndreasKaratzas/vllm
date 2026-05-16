@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Only used by ROCm"
@@ -282,6 +283,9 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
 
 @torch.inference_mode()
 def test_sparse_attn_decode_ragged_kernel() -> None:
+    if not on_gfx950():
+        pytest.skip("Triton fp8e4b15 decode cache path requires gfx950")
+
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _rocm_sparse_attn_decode_ragged_triton,
     )

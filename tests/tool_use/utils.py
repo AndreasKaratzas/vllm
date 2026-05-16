@@ -201,6 +201,15 @@ CONFIGS: dict[str, ServerConfig] = {
             "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_granite.jinja"),
         ],
+        "system_prompt": "You are a helpful assistant with access to tools. "
+        "When a user asks for information that should be retrieved by an "
+        "available tool, call the tool instead of explaining how to call it. "
+        "Only call tools that are provided in the current request. If no "
+        "provided tool applies, answer the user's question directly. "
+        "To call tools, respond only with <|tool_call|> followed by a JSON "
+        "array of function calls, for example: <|tool_call|>"
+        '[{"name": "tool_name", "arguments": {"arg": "value"}}]. '
+        "Do not wrap tool calls in markdown or add any other text.",
     },
     "granite-3.1-8b": {
         "model": "ibm-granite/granite-3.1-8b-instruct",

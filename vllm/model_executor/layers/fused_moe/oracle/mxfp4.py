@@ -1365,24 +1365,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend in TRITON_BACKENDS:
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
-        if mxfp4_backend == Mxfp4MoeBackend.TRITON:
-
-            def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
-                shape = w.shape
-                n = shape[-1]
-                first = w[..., : n // 2]
-                second = w[..., n // 2 :]
-                stacked = torch.stack((first, second), dim=-1)
-                return stacked.reshape(shape)
-
-            w13_weight = shuffle_weight(w13_weight)
-            w13_weight_scale = shuffle_weight(w13_weight_scale)
-
-            if w13_bias is not None:
-                w13_bias = shuffle_weight(w13_bias.to(torch.float32))
-        else:
-            if w13_bias is not None:
-                w13_bias = w13_bias.to(torch.float32)
+        if w13_bias is not None:
+            w13_bias = w13_bias.to(torch.float32)
 
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)

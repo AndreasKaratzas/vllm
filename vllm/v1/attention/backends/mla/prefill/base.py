@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Abstract base class for MLA prefill backends."""
 
+import threading
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar
 
@@ -89,6 +90,15 @@ class MLAPrefillBackend(ABC):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.vllm_config = vllm_config
+        self._prefill_metadata_storage = threading.local()
+
+    @property
+    def _prefill_metadata(self) -> "MLACommonPrefillMetadata":
+        return self._prefill_metadata_storage.value
+
+    @_prefill_metadata.setter
+    def _prefill_metadata(self, metadata: "MLACommonPrefillMetadata") -> None:
+        self._prefill_metadata_storage.value = metadata
 
     def prepare_metadata(  # noqa: B027
         self,

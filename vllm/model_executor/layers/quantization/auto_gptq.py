@@ -41,6 +41,7 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_marlin_supported,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
@@ -59,6 +60,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -264,6 +266,36 @@ class AutoGPTQConfig(QuantizationConfig):
             return None
         quant_method.input_dtype = get_marlin_input_dtype(prefix)
         return quant_method
+
+    @classmethod
+    def is_gptq_marlin_compatible(cls, quant_config: dict[str, Any]):
+        quant_method = quant_config.get("quant_method", "").lower()
+        num_bits = quant_config.get("bits")
+        group_size = quant_config.get("group_size")
+        sym = quant_config.get("sym")
+        desc_act = quant_config.get("desc_act")
+
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_mi3xx
+
+            if not on_mi3xx():
+                return False
+        elif not (current_platform.is_cuda() or current_platform.is_cpu()):
+            return False
+
+        if quant_method != "gptq":
+            return False
+
+        # Marlin conversion is only valid if required properties are found
+        if num_bits is None or group_size is None or sym is None or desc_act is None:
+            return False
+
+        if (num_bits, sym) not in cls.TYPE_MAP:
+            return False
+
+        return check_marlin_supported(
+            quant_type=cls.TYPE_MAP[(num_bits, sym)], group_size=group_size
+        )
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper):
         if self.modules_in_block_to_quantize is not None:

@@ -29,11 +29,14 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
 FP8_DTYPE = current_platform.fp8_dtype()
+
+HAS_CUTLASS_SCALED_MM = hasattr(torch.ops._C, "cutlass_scaled_mm")
 
 prompts = [
     "Hello, my name is",
@@ -266,8 +269,18 @@ def test_async_tp_pass_replace(
             "Only bf16 high precision output types are supported for "
             "per-token (row-wise) scaling"
         )
+    if (
+        test_model
+        in (
+            TestCutlassScaledMMRSModel,
+            TestAGCutlassScaledMMModel,
+        )
+        and not HAS_CUTLASS_SCALED_MM
+    ):
+        pytest.skip("cutlass_scaled_mm is not registered on this platform")
 
     num_processes = 2
+    master_port = get_open_port()
 
     def run_torch_spawn(fn, nprocs):
         # need to use torch.mp.spawn otherwise will have problems with
@@ -276,6 +289,7 @@ def test_async_tp_pass_replace(
             fn,
             args=(
                 num_processes,
+                master_port,
                 test_model,
                 batch_size,
                 seq_len,
@@ -308,6 +322,7 @@ def test_async_tp_pass_requires_full_graph_compilation():
 def async_tp_pass_on_test_model(
     local_rank: int,
     world_size: int,
+    master_port: int,
     test_model_cls: torch.nn.Module,
     batch_size: int,
     seq_len: int,
@@ -328,7 +343,7 @@ def async_tp_pass_on_test_model(
             "LOCAL_RANK": str(local_rank),
             "WORLD_SIZE": str(world_size),
             "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "12345",
+            "MASTER_PORT": str(master_port),
         }
     )
 

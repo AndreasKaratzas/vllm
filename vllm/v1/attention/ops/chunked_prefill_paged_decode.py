@@ -416,14 +416,16 @@ def chunked_prefill_paged_decode(
             " falling back to Triton implementation."
         )
         real_block_size = value_cache.shape[3]
-        # The standard model directly uses the original block_size.
-        # Non-standard 544 uses 32 to accommodate integer division logic.
-        # Cap at 128 to avoid exceeding GPU shared memory limits
-        # (e.g. hybrid Mamba models inflate block_size to 2048).
-        # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
-        # via the l_block_idx/internal_offsets addressing logic.
-        MAX_TRITON_BLOCK_SIZE = 128
-        TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
+        # The Triton tile size is independent from the physical KV cache block
+        # size. Keep the tile small enough for ROCm LDS limits; the
+        # PHYSICAL_BLOCK_SIZE path below still addresses the original cache
+        # layout correctly.
+        if current_platform.is_rocm():
+            TRITON_BLOCK_SIZE = min(block_size, 32)
+        else:
+            # Cap at 128 to avoid excessive shared-memory use for large hybrid
+            # blocks while preserving the old power-of-two path otherwise.
+            TRITON_BLOCK_SIZE = min(block_size, 128) if is_pow2 else 32
         if is_block_table_ptr:
             # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()

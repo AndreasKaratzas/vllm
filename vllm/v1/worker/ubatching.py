@@ -73,6 +73,21 @@ class UBatchContext:
 
     def _restore_context(self):
         forward_context._forward_context = self.forward_context
+        self._restore_thread_local_attention_metadata()
+
+    def _restore_thread_local_attention_metadata(self):
+        """Install per-ubatch attention metadata in this worker thread."""
+        attn_metadata = self.forward_context.attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return
+
+        for metadata in attn_metadata.values():
+            prefill_metadata = getattr(metadata, "prefill", None)
+            if prefill_metadata is None:
+                continue
+            prefill_backend = getattr(prefill_metadata, "prefill_backend", None)
+            if prefill_backend is not None:
+                prefill_backend.prepare_metadata(prefill_metadata)
 
     def update_stream(self, stream):
         self.current_stream = stream

@@ -206,7 +206,21 @@ def test_tp2_ar_rms_fusions(
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
+    if (
+        current_platform.is_rocm()
+        and attn_backend.backend.name == "ROCM_ATTN"
+        and model_name == "openai/gpt-oss-20b"
+    ):
+        pytest.skip("ROCM_ATTN does not support attention sinks used by gpt-oss")
+
     matches = matches_fn(n_layers)
+    if current_platform.is_rocm():
+        # The ROCm AITER pass exposes match counts through the pass table and
+        # only sees the AR+RMS sites present in each model's compiled graph.
+        if model_name == "openai/gpt-oss-20b":
+            matches = matches._replace(ar_rms_fusion=n_layers + 1)
+        else:
+            matches = matches._replace(ar_rms_fusion=matches.ar_rms_fusion - 1)
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)

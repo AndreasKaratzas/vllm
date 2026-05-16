@@ -14,6 +14,9 @@ git show --oneline -s "$merge_base_commit"
 meta_json_url="https://wheels.vllm.ai/$merge_base_commit/vllm/metadata.json"
 echo "INFO: will use metadata.json from $meta_json_url"
 
+wheel_commit="$merge_base_commit"
+metadata_found=0
+
 for i in {1..5}; do
     echo "Checking metadata.json URL (attempt $i)..."
     if curl --fail "$meta_json_url" > metadata.json; then
@@ -28,6 +31,7 @@ for i in {1..5}; do
              s.exit(int(not any(o.get('package_name') == 'vllm' and p.machine() in o.get('platform_tag') \
              for o in d)))" 2>/dev/null; then
                 echo "INFO: metadata.json contains a pre-compiled wheel for the current architecture."
+                metadata_found=1
                 break
             else
                 echo "WARN: metadata.json does not have a pre-compiled wheel for the current architecture."
@@ -44,13 +48,30 @@ for i in {1..5}; do
         echo "ERROR: metadata is still not available after 5 attempts."
         echo "ERROR: Please check whether the precompiled wheel for commit $merge_base_commit is available."
         echo " NOTE: If $merge_base_commit is a new commit on main, maybe try again after its release pipeline finishes."
-        echo " NOTE: If it fails, please report in #sig-ci channel."
-        exit 1
+        echo " NOTE: Falling back to the latest already-built nightly wheel for this python-only compile check."
     else
         echo "WARNING: metadata is not available. Retrying after 5 minutes..."
         sleep 300
     fi
 done
+
+if [ "$metadata_found" -eq 0 ]; then
+    wheel_commit="nightly"
+    meta_json_url="https://wheels.vllm.ai/$wheel_commit/vllm/metadata.json"
+    echo "INFO: checking fallback metadata.json from $meta_json_url"
+    if ! curl --fail "$meta_json_url" > metadata.json; then
+        echo "ERROR: fallback metadata.json is not available either."
+        exit 1
+    fi
+    python3 -m json.tool metadata.json
+    if ! python3 -c "import platform as p,json as j,sys as s; d = j.load(open('metadata.json')); \
+     s.exit(int(not any(o.get('package_name') == 'vllm' and p.machine() in o.get('platform_tag') \
+     for o in d)))" 2>/dev/null; then
+        echo "ERROR: fallback metadata.json does not have a pre-compiled wheel for the current architecture."
+        exit 1
+    fi
+    echo "INFO: fallback metadata.json contains a pre-compiled wheel for the current architecture."
+fi
 
 set -x
 
@@ -67,7 +88,7 @@ apt autoremove -y
 
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
-VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
+VLLM_PRECOMPILED_WHEEL_COMMIT=$wheel_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
 # Run the script
 python3 -c 'import vllm'
 

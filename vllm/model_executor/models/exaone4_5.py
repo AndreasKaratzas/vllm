@@ -25,6 +25,7 @@ from transformers.models.exaone4_5 import (
     Exaone4_5_Config,
     Exaone4_5_Processor,
 )
+from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.exaone4_5.configuration_exaone4_5 import Exaone4_5_VisionConfig
 
 from vllm.compilation.decorators import (
@@ -302,6 +303,9 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
+
+    def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
 
 @MULTIMODAL_REGISTRY.register_processor(

@@ -111,6 +111,12 @@ def test_whisper_multi_lora(whisper_lora_files):
     """
     llm = create_whisper_llm(enable_lora=True, max_loras=4)
 
+    # Warm both adapter IDs before comparing. On MI250, the first Whisper LoRA
+    # request can JIT-compile several Triton kernels during inference and
+    # produce a slightly different transcript from a warmed request.
+    run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)
+    run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=2)
+
     # Test with different LoRA IDs using the same adapter
     outputs_lora1 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)
     outputs_lora2 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=2)

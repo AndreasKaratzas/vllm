@@ -30,6 +30,7 @@ from vllm.multimodal.inputs import (
     MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+    MultiModalPaddedBatchedField,
     MultiModalSharedField,
     NestedTensors,
 )
@@ -48,6 +49,7 @@ CUSTOM_TYPE_RAW_VIEW = 3
 MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
     MultiModalFlatField: "flat",
     MultiModalSharedField: "shared",
+    MultiModalPaddedBatchedField: "batched_pad",
     MultiModalBatchedField: "batched",
 }
 

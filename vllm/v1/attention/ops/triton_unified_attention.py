@@ -230,6 +230,7 @@ def kernel_unified_attention(
     BLOCK_M: tl.constexpr,
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,
     USE_FP8: tl.constexpr,
+    CAUSAL: tl.constexpr,
     # Toggles 2D vs 3D layout.  The 2D path runs the full sequence in one
     # tile loop and writes to ``output_ptr``.  The 3D path scopes the loop
     # to ``[segm_idx, segm_idx+1) × tiles_per_segment`` and writes
@@ -380,6 +381,7 @@ def kernel_unified_attention(
         SLIDING_WINDOW,
         USE_MM_PREFIX,
         IS_3D,
+        CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
     )
@@ -488,6 +490,7 @@ def kernel_unified_attention(
             SLIDING_WINDOW,
             USE_MM_PREFIX,
             MAX_MM_RANGES,
+            CAUSAL,
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
         )
@@ -789,7 +792,6 @@ def unified_attention(
     # disabling this flag costs nothing.
     use_td: bool = False,
 ):
-    assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
     if sinks is not None:
@@ -1015,6 +1017,7 @@ def unified_attention(
         BLOCK_M=BLOCK_M,
         NUM_SEGMENTS_PER_SEQ=num_segments,
         USE_FP8=output_scale is not None,
+        CAUSAL=causal,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
         CHUNK_LOOKBACK=chunk_lookback,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from http import HTTPStatus
 
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -17,6 +18,8 @@ from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
+from vllm.entrypoints.utils import create_error_response
+from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -42,7 +45,16 @@ def attach_router(app: FastAPI):
     @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
     async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
         handler: OpenAIServingModels = models(raw_request)
-        response = await handler.load_lora_adapter(request)
+        try:
+            response = await handler.load_lora_adapter(request)
+        except LoRAAdapterNotFoundError as e:
+            response = create_error_response(e)
+        except Exception as e:
+            response = create_error_response(
+                str(e),
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
         if isinstance(response, ErrorResponse):
             return JSONResponse(
                 content=response.model_dump(), status_code=response.error.code
@@ -62,7 +74,16 @@ def attach_router(app: FastAPI):
         request: UnloadLoRAAdapterRequest, raw_request: Request
     ):
         handler: OpenAIServingModels = models(raw_request)
-        response = await handler.unload_lora_adapter(request)
+        try:
+            response = await handler.unload_lora_adapter(request)
+        except LoRAAdapterNotFoundError as e:
+            response = create_error_response(e)
+        except Exception as e:
+            response = create_error_response(
+                str(e),
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
         if isinstance(response, ErrorResponse):
             return JSONResponse(
                 content=response.model_dump(), status_code=response.error.code

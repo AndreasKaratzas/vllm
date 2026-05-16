@@ -110,6 +110,14 @@ def test_no_sync_with_spec_decode(
     # Import vLLM AFTER sync_tracker fixture has applied the patch
     from vllm import LLM, SamplingParams
     from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.platforms import current_platform
+
+    if (
+        model == "eagle618/deepseek-v3-random"
+        and current_platform.is_rocm()
+        and not current_platform.supports_fp8()
+    ):
+        pytest.skip("DeepSeek FP8-MoE spec decode requires MI300+ on ROCm")
 
     # Qwen3.5 is a VLM; without this, profile_run runs the ViT warmup
     # and peaks well above the 18GB MIG slice used by one of the CI lanes.

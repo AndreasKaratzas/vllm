@@ -114,6 +114,10 @@ async def serve_http(
         )
 
         server.should_exit = True
+        if timeout == 0:
+            # Abort shutdown should not wait for open HTTP connections after
+            # EngineCore has aborted in-flight requests.
+            server.force_exit = True
         server_task.cancel()
         watchdog_task.cancel()
         if ssl_cert_refresher:

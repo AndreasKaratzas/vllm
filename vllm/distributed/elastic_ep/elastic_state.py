@@ -300,6 +300,7 @@ class ElasticEPScalingState:
             self._eplb_reshuffle()
             self.state = ScaleUpExistingEngineState.COMPLETE
             self._update_parallel_config()
+            self._notify_reconfigure_finished()
             return True
 
         else:
@@ -394,6 +395,7 @@ class ElasticEPScalingState:
             self._switch_and_prepare()
             self._update_parallel_config()
             self.state = ScaleDownRemainingEngineState.COMPLETE
+            self._notify_reconfigure_finished()
             return True
 
         else:
@@ -529,10 +531,14 @@ class ElasticEPScalingState:
         self.engine_core.current_wave = int(data[1])
         self.engine_core.step_counter = int(data[2])
         if new_dp_group.rank() == 0:
+            logger.info("[Elastic EP] Switched to new setup")
+
+    def _notify_reconfigure_finished(self):
+        assert self.new_dp_group is not None
+        if self.new_dp_group.rank() == 0:
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.RECONFIGURE_FINISHED
             )
-            logger.info("[Elastic EP] Switched to new setup")
 
     def _eplb_reshuffle(self):
         self.model_executor.collective_rpc(

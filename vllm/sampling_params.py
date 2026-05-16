@@ -64,7 +64,7 @@ class StructuredOutputsParams:
                 self.regex is not None,
                 self.choice is not None,
                 self.grammar is not None,
-                self.json_object is not None,
+                self.json_object is True,
                 self.structural_tag is not None,
             ]
         )
@@ -543,10 +543,11 @@ class SamplingParams(
                 "Set detokenize=True to use stop."
             )
         assert isinstance(self.bad_words, list)
-        if any(not bad_word for bad_word in self.bad_words):
-            raise ValueError(
-                f"bad_words cannot contain an empty string. "
-                f"Got bad_words={self.bad_words}"
+        if any(not bad_word.strip() for bad_word in self.bad_words):
+            raise VLLMValidationError(
+                "bad_words cannot contain empty or whitespace-only strings.",
+                parameter="bad_words",
+                value=self.bad_words,
             )
 
     def _verify_greedy_sampling(self) -> None:

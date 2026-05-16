@@ -12,11 +12,66 @@ import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils.mem_utils import MemorySnapshot
-from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
+from vllm.utils.mem_utils import MemoryProfilingResult, MemorySnapshot
+from vllm.v1.worker.gpu_worker import (
+    Worker,
+    _finalize_memory_profiling_result,
+    init_worker_distributed_environment,
+)
 
 # Global queue to track operation order across processes
 _QUEUE: Queue | None = None
+
+
+def test_memory_profile_free_increase_is_reserved_as_non_kv_memory():
+    """Free memory increases should not inflate the KV cache budget."""
+    gib = 1024**3
+    init_snapshot = MemorySnapshot(
+        free_memory=100 * gib,
+        total_memory=120 * gib,
+        device="cpu",
+        auto_measure=False,
+    )
+    profile_result = MemoryProfilingResult(
+        before_create=init_snapshot,
+        weights_memory=10 * gib,
+    )
+    profile_result.after_profile.free_memory = 103 * gib
+    profile_result.torch_peak_increase = 5 * gib
+    profile_result.non_torch_increase = -2 * gib
+
+    free_memory = _finalize_memory_profiling_result(
+        init_snapshot, profile_result
+    )
+
+    assert free_memory == 103 * gib
+    assert profile_result.non_torch_increase == 3 * gib
+    assert profile_result.non_kv_cache_memory == 18 * gib
+
+
+def test_memory_profile_without_free_increase_preserves_accounting():
+    gib = 1024**3
+    init_snapshot = MemorySnapshot(
+        free_memory=100 * gib,
+        total_memory=120 * gib,
+        device="cpu",
+        auto_measure=False,
+    )
+    profile_result = MemoryProfilingResult(
+        before_create=init_snapshot,
+        weights_memory=10 * gib,
+    )
+    profile_result.after_profile.free_memory = 98 * gib
+    profile_result.torch_peak_increase = 5 * gib
+    profile_result.non_torch_increase = 2 * gib
+
+    free_memory = _finalize_memory_profiling_result(
+        init_snapshot, profile_result
+    )
+
+    assert free_memory == 98 * gib
+    assert profile_result.non_torch_increase == 2 * gib
+    assert profile_result.non_kv_cache_memory == 17 * gib
 
 
 def track_operation(operation: str, rank: int):

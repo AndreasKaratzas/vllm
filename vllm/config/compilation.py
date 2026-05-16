@@ -964,7 +964,12 @@ class CompilationConfig:
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True
-            self.inductor_compile_config["benchmark_combo_kernel"] = True
+            # PyTorch's combo-kernel benchmark path asks size_hint() to turn
+            # symbolic unbacked dimensions into Python ints. That is invalid,
+            # so keep combo kernels enabled but avoid benchmark selection there.
+            self.inductor_compile_config["benchmark_combo_kernel"] = (
+                self.dynamic_shapes_config.type != DynamicShapesType.UNBACKED
+            )
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"

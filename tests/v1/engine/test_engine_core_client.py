@@ -52,12 +52,20 @@ if not current_platform.is_cuda_alike():
     )
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+ENGINE_TEST_MAX_MODEL_LEN = 1024
+ENGINE_TEST_GPU_MEMORY_UTILIZATION = 0.4
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quantization kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 TEST_MODULE = "tests.v1.engine.test_engine_core_client"
 
 _REQUEST_COUNTER = 0
+
+
+def make_engine_args(**kwargs: Any) -> EngineArgs:
+    kwargs.setdefault("max_model_len", ENGINE_TEST_MAX_MODEL_LEN)
+    kwargs.setdefault("gpu_memory_utilization", ENGINE_TEST_GPU_MEMORY_UTILIZATION)
+    return EngineArgs(**kwargs)
 
 
 def make_request(
@@ -502,7 +510,7 @@ def test_engine_core_client(
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo", echo, raising=False)
 
-        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        engine_args = make_engine_args(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
         executor_class = Executor.get_class(vllm_config)
 
@@ -515,71 +523,74 @@ def test_engine_core_client(
                 log_stats=False,
             )
 
-        MAX_TOKENS = 20
-        params = SamplingParams(max_tokens=MAX_TOKENS)
-        """Normal Request Cycle."""
-        requests = [make_request(params) for _ in range(10)]
-        request_ids = [req.request_id for req in requests]
+        try:
+            MAX_TOKENS = 20
+            params = SamplingParams(max_tokens=MAX_TOKENS)
+            """Normal Request Cycle."""
+            requests = [make_request(params) for _ in range(10)]
+            request_ids = [req.request_id for req in requests]
 
-        # Add requests to the engine.
-        for request in requests:
-            client.add_request(request)
-            time.sleep(0.01)
+            # Add requests to the engine.
+            for request in requests:
+                client.add_request(request)
+                time.sleep(0.01)
 
-        outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
-        loop_until_done(client, outputs)
+            outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
+            loop_until_done(client, outputs)
 
-        for req_id in request_ids:
-            assert len(outputs[req_id]) == MAX_TOKENS, (
-                f"{outputs[req_id]=}, {MAX_TOKENS=}"
-            )
-        """Abort Request Cycle."""
-
-        # Note: this code pathway will only work for multiprocessing
-        # since we have to call get_output() explicitly
-
-        # Add requests to the engine.
-        for idx, request in enumerate(requests):
-            client.add_request(request)
-            time.sleep(0.01)
-            if idx % 2 == 0:
-                client.abort_requests([request.request_id])
-
-        outputs = {req_id: [] for req_id in request_ids}
-        loop_until_done(client, outputs)
-
-        for idx, req_id in enumerate(request_ids):
-            if idx % 2 == 0:
-                assert len(outputs[req_id]) < MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
-                )
-            else:
+            for req_id in request_ids:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                    f"{outputs[req_id]=}, {MAX_TOKENS=}"
                 )
-        """Abort after request is finished."""
+            """Abort Request Cycle."""
 
-        # Note: this code pathway will only work for multiprocessing
-        # since we have to call get_output() explicitly
+            # Note: this code pathway will only work for multiprocessing
+            # since we have to call get_output() explicitly
 
-        request = requests[0]
-        client.add_request(request)
-        time.sleep(10.0)
+            # Add requests to the engine.
+            for idx, request in enumerate(requests):
+                client.add_request(request)
+                time.sleep(0.01)
+                if idx % 2 == 0:
+                    client.abort_requests([request.request_id])
 
-        client.abort_requests([request.request_id])
+            outputs = {req_id: [] for req_id in request_ids}
+            loop_until_done(client, outputs)
 
-        if multiprocessing_mode:
-            """Utility method invocation"""
+            for idx, req_id in enumerate(request_ids):
+                if idx % 2 == 0:
+                    assert len(outputs[req_id]) < MAX_TOKENS, (
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                    )
+                else:
+                    assert len(outputs[req_id]) == MAX_TOKENS, (
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                    )
+            """Abort after request is finished."""
 
-            core_client: SyncMPClient = client
+            # Note: this code pathway will only work for multiprocessing
+            # since we have to call get_output() explicitly
 
-            result = core_client.call_utility("echo", "testarg")
-            assert result == "testarg"
+            request = requests[0]
+            client.add_request(request)
+            time.sleep(10.0)
 
-            with pytest.raises(Exception) as e_info:
-                core_client.call_utility("echo", None, "help!")
+            client.abort_requests([request.request_id])
 
-            assert str(e_info.value) == "Call to echo method failed: help!"
+            if multiprocessing_mode:
+                """Utility method invocation"""
+
+                core_client: SyncMPClient = client
+
+                result = core_client.call_utility("echo", "testarg")
+                assert result == "testarg"
+
+                with pytest.raises(Exception) as e_info:
+                    core_client.call_utility("echo", None, "help!")
+
+                assert str(e_info.value) == "Call to echo method failed: help!"
+        finally:
+            client.shutdown()
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -591,7 +602,7 @@ async def test_engine_core_client_asyncio(
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo", echo, raising=False)
 
-        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        engine_args = make_engine_args(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT
         )
@@ -691,7 +702,7 @@ async def test_engine_core_client_util_method_custom_return(
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo_dc", echo_dc, raising=False)
 
-        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        engine_args = make_engine_args(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT
         )
@@ -739,7 +750,7 @@ async def test_engine_core_client_util_method_custom_dict_return(
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo_dc_dict", echo_dc_dict, raising=False)
 
-        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        engine_args = make_engine_args(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT
         )
@@ -796,7 +807,7 @@ async def test_engine_core_client_util_method_nested_structures(
         # Monkey-patch core engine utility function to test.
         m.setattr(EngineCore, "echo_dc_nested", echo_dc_nested, raising=False)
 
-        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        engine_args = make_engine_args(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT
         )
@@ -905,7 +916,7 @@ async def test_engine_core_client_future_utility_async(
     with monkeypatch.context() as m:
         m.setattr(EngineCore, "future_echo", future_echo, raising=False)
 
-        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        engine_args = make_engine_args(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT
         )
@@ -939,7 +950,7 @@ async def test_engine_core_client_future_utility_async(
 @pytest.mark.parametrize(
     "model_name,num_groups",
     [
-        ("meta-llama/Llama-3.2-1B-Instruct", 1),
+        (MODEL_NAME, 1),
         ("google/gemma-3-1b-it", 7),
     ],
 )
@@ -957,7 +968,7 @@ def test_kv_cache_events(
     block_size = 16
     num_blocks = 2
 
-    engine_args = EngineArgs(
+    engine_args = make_engine_args(
         model=model_name,
         enforce_eager=True,
         enable_prefix_caching=True,
@@ -1038,7 +1049,7 @@ async def test_kv_cache_events_dp(
     dp_size = 2
     tp_size = 2
 
-    engine_args = EngineArgs(
+    engine_args = make_engine_args(
         model=MODEL_NAME,
         enforce_eager=True,
         enable_prefix_caching=True,
@@ -1131,7 +1142,7 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
         m.setattr(CoreEngineProcManager, "__init__", patched_cepm_ctor)
 
         t = time.time()
-        engine_args = EngineArgs(model=MODEL_NAME)
+        engine_args = make_engine_args(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT
         )
@@ -1211,7 +1222,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         # Background processes are not important here
         m.setattr(EngineCoreProc, "startup_handshake", mock_startup_handshake)
 
-        vllm_config = EngineArgs(
+        vllm_config = make_engine_args(
             model="deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True
         ).create_engine_config()
         engine_core_proc = EngineCoreProc(

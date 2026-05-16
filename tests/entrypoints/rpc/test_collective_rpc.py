@@ -42,7 +42,7 @@ def server():
     with RemoteOpenAIServer(
         MODEL_NAME,
         args,
-        env_dict={"VLLM_SERVER_DEV_MODE": "1", "CUDA_VISIBLE_DEVICES": "0"},
+        env_dict={"VLLM_SERVER_DEV_MODE": "1"},
     ) as remote_server:
         yield remote_server
 

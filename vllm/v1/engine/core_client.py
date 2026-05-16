@@ -1505,12 +1505,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def _eep_wait_for_setup_switch_complete(self) -> None:
         """
-        Wait for core engines to switch to the new setup.
+        Wait for core engines to finish elastic EP reconfiguration.
 
         In eep_process_engine_core_notification(), a dummy UtilityOutput with
         EEP_NOTIFICATION_CALL_ID will be set when RECONFIGURE_FINISHED
-        notification is received from engine 0. We create a future with
-        that call_id and wait for it to be resolved.
+        notification is received from engine 0 after EPLB reshuffle and
+        workspace rewarm complete. We create a future with that call_id and
+        wait for it to be resolved.
         """
         future = asyncio.get_running_loop().create_future()
         self.utility_results[EEP_NOTIFICATION_CALL_ID] = future

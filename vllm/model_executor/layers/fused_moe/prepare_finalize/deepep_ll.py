@@ -21,6 +21,7 @@ from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -61,6 +62,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     SUPPORTED_HIDDEN_SIZES = [2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192]
 
     @staticmethod
+    def supports_native_fp8_dispatch() -> bool:
+        # DeepEP LL's native FP8 dispatch uses OCP E4M3 bounds. That matches
+        # CUDA/gfx950, but not gfx94 FNUZ, whose finite max is lower.
+        return not current_platform.is_fp8_fnuz()
+
+    @staticmethod
     def maybe_roundup_layer_hidden_size(hidden_size: int) -> int:
         # Round up hidden size to the closest supported hidden size.
         _supported_hs = DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES
@@ -96,6 +103,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
+        if use_fp8_dispatch and not self.supports_native_fp8_dispatch():
+            logger.warning_once(
+                "DeepEP low-latency native FP8 dispatch is disabled on this "
+                "platform because DeepEP uses OCP E4M3 FP8 bounds while the "
+                "platform uses FNUZ FP8. Falling back to BF16 dispatch with "
+                "vLLM-side quantization."
+            )
+            use_fp8_dispatch = False
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the

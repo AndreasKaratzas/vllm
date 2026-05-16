@@ -1052,7 +1052,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       Qlocal[h] = q_ptrh8[qhead_idx * HEAD_SIZE / 8 + qhead_elemh8];
     }
     const int final_qhead_idx = 4 * (QHLOOP - 1) + lane4id;
-    if (final_qhead_idx < GQA_RATIO) {
+    // HEAD_SIZE=64 has only 8 packed 16B chunks per head; lanes with
+    // qhead_elemh8 >= 8 must not read into the next head or past the group.
+    if (final_qhead_idx < GQA_RATIO && qhead_elemh8 < HEAD_SIZE / 8) {
       Qlocal[QHLOOP - 1] =
           q_ptrh8[final_qhead_idx * HEAD_SIZE / 8 + qhead_elemh8];
     } else {

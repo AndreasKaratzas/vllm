@@ -430,10 +430,11 @@ class OpenAIServingChat(OpenAIServing):
         else:
             tool_choice_function_name = None
 
-        # Determine whether tools are in use with "auto" tool choice
-        tool_choice_auto = (
-            not tool_choice_function_name
-            and self._should_stream_with_auto_tool_parsing(request)
+        stream_with_parser = self._should_stream_with_parser(
+            request=request,
+            reasoning_parser=reasoning_parser,
+            tool_choice_function_name=tool_choice_function_name,
+            is_mistral_grammar_path=is_mistral_grammar_path,
         )
 
         all_previous_token_ids: list[list[int]] | None
@@ -447,13 +448,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
-        if (
-            is_mistral_grammar_path
-            or tool_choice_auto
-            or tool_choice_function_name
-            or request.tool_choice == "required"
-            or reasoning_parser
-        ):
+        if stream_with_parser:
             all_previous_token_ids = [[] for _ in range(num_choices)]
             reasoning_end_arr = [False] * num_choices
             prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
@@ -461,7 +456,7 @@ class OpenAIServingChat(OpenAIServing):
             all_previous_token_ids = None
 
         try:
-            if self.parser_cls is not None:
+            if self.parser_cls is not None and stream_with_parser:
                 if tokenizer is None:
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
@@ -655,13 +650,7 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: DeltaMessage | None
 
                     # just update previous_texts and previous_token_ids
-                    if (
-                        is_mistral_grammar_path
-                        or tool_choice_auto
-                        or tool_choice_function_name
-                        or request.tool_choice == "required"
-                        or reasoning_parser
-                    ):
+                    if stream_with_parser:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_text = previous_texts[i]
@@ -728,13 +717,7 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = DeltaMessage(content=delta_text)
 
                     # update the previous values for the next iteration
-                    if (
-                        is_mistral_grammar_path
-                        or tool_choice_auto
-                        or tool_choice_function_name
-                        or request.tool_choice == "required"
-                        or reasoning_parser
-                    ) and not self.use_harmony:
+                    if stream_with_parser and not self.use_harmony:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_texts[i] = current_text
@@ -1515,6 +1498,21 @@ class OpenAIServingChat(OpenAIServing):
             and self.tool_parser
             and self.enable_auto_tools
             and request.tool_choice in ["auto", None]
+        )
+
+    def _should_stream_with_parser(
+        self,
+        request: ChatCompletionRequest,
+        reasoning_parser: ReasoningParser | None,
+        tool_choice_function_name: str | None,
+        is_mistral_grammar_path: bool,
+    ) -> bool:
+        return bool(
+            reasoning_parser
+            or is_mistral_grammar_path
+            or tool_choice_function_name
+            or request.tool_choice == "required"
+            or self._should_stream_with_auto_tool_parsing(request)
         )
 
     def _should_check_for_unstreamed_tool_arg_tokens(

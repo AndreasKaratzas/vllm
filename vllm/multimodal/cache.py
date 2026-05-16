@@ -382,14 +382,12 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
     How to update each item:
 
-    - If the item is already in the cache, clear the input to avoid
-      unnecessary IPC.
+    - If the item is already in the cache, replace the input with the cached
+      item. This keeps the sender and receiver caches recoverable if a request
+      updates P0 but fails before P1 mirrors the item.
 
-    - If the item is not in the cache, store the metadata of that item so
-      that the eviction policy remains the same as the cache on P1,
-      and return the input.
-      By only storing the metadata, we avoid keeping the data itself in
-      memory inside P0.
+    - If the item is not in the cache, store that item so that the eviction
+      policy remains the same as the cache on P1, and return the input.
     """
 
     def __init__(self, model_config: "ModelConfig") -> None:
@@ -399,7 +397,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
         self._cache = MultiModalCache.get_lru_cache(
             mm_config.mm_processor_cache_gb,
-            MultiModalProcessorCacheItemMetadata,
+            MultiModalProcessorCacheItem,
         )
 
     @override
@@ -413,11 +411,11 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
         if (cached_item := self._cache.get(mm_hash)) is not None:
-            return None, cached_item.prompt_updates
+            return cached_item.item, cached_item.prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalProcessorCacheItemMetadata(*mm_item)
+        self._cache[mm_hash] = MultiModalProcessorCacheItem(*mm_item)
 
         return mm_item
 

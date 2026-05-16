@@ -53,11 +53,21 @@ def test_memory_profiling():
     measured_diff = monitored_values.values[-1] - monitored_values.values[0]
     assert measured_diff == 256 * 1024 * 1024
 
+    # memory_profiling intentionally measures non-torch memory from the
+    # baseline snapshot through the end of profiling. Some ROCm runtimes can
+    # materialize non-torch runtime memory after the baseline snapshot but
+    # before the profiling block, so include that observed pre-profile delta in
+    # the test oracle instead of assuming it is always zero.
+    pre_profile_diff = result.before_profile - baseline_snapshot
+    expected_non_torch_increase = (
+        pre_profile_diff.non_torch_memory + measured_diff
+    )
+
     # Check that the memory usage is within 5% of the expected values
     # 5% tolerance is caused by cuda runtime.
     # we cannot control cuda runtime in the granularity of bytes,
     # which causes a small error (<10 MiB in practice)
-    non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024)  # noqa
+    non_torch_ratio = result.non_torch_increase / expected_non_torch_increase
     assert abs(non_torch_ratio - 1) <= 0.05
     assert result.torch_peak_increase == 1024 * 1024 * 1024
     del weights

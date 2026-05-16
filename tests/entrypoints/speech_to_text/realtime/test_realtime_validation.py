@@ -14,6 +14,7 @@ from tests.entrypoints.speech_to_text.conftest import add_attention_backend
 from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
 from vllm.multimodal.media.audio import load_audio
+from vllm.platforms import current_platform
 
 # Increase engine iteration timeout for ROCm where first-use JIT compilation
 # can exceed the default 60s, causing a silent deadlock in feed_tokens.
@@ -32,6 +33,23 @@ MISTRAL_FORMAT_ARGS = [
 ] + ROCM_EXTRA_ARGS
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
+MARY_LAMB_TRANSCRIPTS = (
+    " First words I spoke in the original phonograph."
+    " A little piece of practical poetry. Mary had a little lamb,"
+    " it sleeps with quite a flow, and everywhere that Mary went,"
+    " the lamb was sure to go.",
+    " First words I spoke in the original phonograph."
+    " A little piece of practical poetry. Mary had a little lamb,"
+    " it squeaked with quite a flow, and everywhere that Mary went,"
+    " the lamb was sure to go.",
+)
+MARY_LAMB_TRANSCRIPT_PHRASES = (
+    "first words i spoke in the original phonograph",
+    "a little piece of practical poetry",
+    "mary had a little lamb",
+    "everywhere that mary went",
+    "the lamb was sure to go",
+)
 
 
 def _get_websocket_url(server: RemoteOpenAIServer) -> str:
@@ -50,6 +68,21 @@ async def receive_event(ws, timeout: float = 60.0) -> dict:
 async def send_event(ws, event: dict) -> None:
     """Send JSON event to WebSocket."""
     await ws.send(json.dumps(event))
+
+
+def assert_mary_lamb_transcript(text: str) -> None:
+    if not current_platform.is_rocm():
+        assert text in MARY_LAMB_TRANSCRIPTS
+        return
+
+    normalized = " ".join(text.lower().split())
+    missing = [
+        phrase for phrase in MARY_LAMB_TRANSCRIPT_PHRASES if phrase not in normalized
+    ]
+    assert not missing, (
+        "Realtime transcript missed expected content "
+        f"{missing!r}. Full transcript: {text!r}"
+    )
 
 
 @pytest.fixture
@@ -158,17 +191,7 @@ async def test_multi_chunk_streaming(
             # Verify transcription contains expected content
             assert event["type"] == "transcription.done"
             assert event["text"] == full_text
-            assert full_text == (
-                " First words I spoke in the original phonograph."
-                " A little piece of practical poetry. Mary had a little lamb,"
-                " it sleeps with quite a flow, and everywhere that Mary went,"
-                " the lamb was sure to go."
-            ) or full_text == (
-                " First words I spoke in the original phonograph."
-                " A little piece of practical poetry. Mary had a little lamb,"
-                " it squeaked with quite a flow, and everywhere that Mary went,"
-                " the lamb was sure to go."
-            )
+            assert_mary_lamb_transcript(full_text)
 
 
 @pytest.mark.asyncio

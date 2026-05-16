@@ -11,9 +11,10 @@ import multiprocessing
 import os
 import socket
 
-from tests.utils import multi_gpu_test
+from tests.utils import multi_gpu_test, requires_spawn_multiprocessing
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
@@ -64,6 +65,67 @@ def create_test_scheduler_output(num_requests: int = 1) -> SchedulerOutput:
         num_scheduled_tokens={},
         total_num_scheduled_tokens=0,
     )
+
+
+def _run_multiproc_executor_node(
+    node_rank: int,
+    result_queue: multiprocessing.Queue,
+    port: int,
+) -> None:
+    """Run one simulated node's executor for the multi-node test."""
+    executor = None
+    try:
+        # Set CUDA_VISIBLE_DEVICES for this node.
+        visible_devices = "0,1" if node_rank == 0 else "2,3"
+        os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+        if current_platform.is_rocm():
+            os.environ["HIP_VISIBLE_DEVICES"] = visible_devices
+
+        # Create config for this node.
+        vllm_config = create_vllm_config(
+            tensor_parallel_size=4,  # Total TP across all nodes.
+            pipeline_parallel_size=1,
+            nnodes=2,  # 2 nodes.
+            node_rank=node_rank,
+            master_port=port,  # same port.
+        )
+
+        # Create executor for this node.
+        executor = MultiprocExecutor(vllm_config=vllm_config)
+
+        # Verify node-specific properties.
+        assert executor.world_size == 4, f"World size should be 4 on node {node_rank}"
+        assert executor.local_world_size == 2, (
+            f"Local world size should be 2 on node {node_rank}"
+        )
+        assert len(executor.workers) == 2, (
+            f"Should have 2 local workers on node {node_rank}"
+        )
+
+        # Verify worker ranks are correct for this node.
+        expected_ranks = [node_rank * 2, node_rank * 2 + 1]
+        actual_ranks = sorted([w.rank for w in executor.workers])
+        assert actual_ranks == expected_ranks, (
+            f"Node {node_rank} should have workers "
+            f"with ranks {expected_ranks}, got {actual_ranks}"
+        )
+        for worker in executor.workers:
+            assert worker.proc.is_alive(), (
+                f"Worker rank {worker.rank} should be alive on node {node_rank}"
+            )
+
+        # Put success result in queue BEFORE shutdown to avoid hanging.
+        result_queue.put({"node": node_rank, "success": True})
+        import time
+
+        time.sleep(2)
+        executor.shutdown()
+    except Exception as e:
+        result_queue.put({"node": node_rank, "success": False, "error": str(e)})
+        raise e
+    finally:
+        if executor is not None:
+            executor.shutdown()
 
 
 def test_multiproc_executor_initialization():
@@ -339,74 +401,17 @@ def test_multiproc_executor_multi_node():
     # symm_mem does not work for simulating multi instance in single node
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
-    def run_node(node_rank: int, result_queue: multiprocessing.Queue, port: int):
-        """Run a single node's executor."""
-        executor = None
-        try:
-            # Set CUDA_VISIBLE_DEVICES for this node
-            if node_rank == 0:
-                os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
-            else:
-                os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
-
-            # Create config for this node
-            vllm_config = create_vllm_config(
-                tensor_parallel_size=4,  # Total TP across all nodes
-                pipeline_parallel_size=1,
-                nnodes=2,  # 2 nodes
-                node_rank=node_rank,
-                master_port=port,  # same port
-            )
-
-            # Create executor for this node
-            executor = MultiprocExecutor(vllm_config=vllm_config)
-
-            # Verify node-specific properties
-            assert executor.world_size == 4, (
-                f"World size should be 4 on node {node_rank}"
-            )
-            assert executor.local_world_size == 2, (
-                f"Local world size should be 2 on node {node_rank}"
-            )
-            assert len(executor.workers) == 2, (
-                f"Should have 2 local workers on node {node_rank}"
-            )
-
-            # Verify worker ranks are correct for this node
-            expected_ranks = [node_rank * 2, node_rank * 2 + 1]
-            actual_ranks = sorted([w.rank for w in executor.workers])
-            assert actual_ranks == expected_ranks, (
-                f"Node {node_rank} should have workers "
-                f"with ranks {expected_ranks}, got {actual_ranks}"
-            )
-            # Verify all workers are alive
-            for worker in executor.workers:
-                assert worker.proc.is_alive(), (
-                    f"Worker rank {worker.rank} should be alive on node {node_rank}"
-                )
-            # executor.gen
-            # Put success result in queue BEFORE shutdown to avoid hanging
-            result_queue.put({"node": node_rank, "success": True})
-            import time
-
-            time.sleep(2)
-            executor.shutdown()
-        except Exception as e:
-            # Put failure result in queue
-            result_queue.put({"node": node_rank, "success": False, "error": str(e)})
-            raise e
-        finally:
-            if executor is not None:
-                executor.shutdown()
-
     # Create a queue to collect results from both processes
-    result_queue: multiprocessing.Queue[dict[str, int | bool]] = multiprocessing.Queue()
+    mp_context = multiprocessing.get_context(
+        "spawn" if requires_spawn_multiprocessing() else "fork"
+    )
+    result_queue = mp_context.Queue()
 
     # Start both node processes
     processes = []
     for node_rank in range(2):
-        p = multiprocessing.Process(
-            target=run_node,
+        p = mp_context.Process(
+            target=_run_multiproc_executor_node,
             args=(node_rank, result_queue, port),
             name=f"Node{node_rank}",
         )

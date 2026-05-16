@@ -420,12 +420,14 @@ def _run_eagle_correctness(
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_MLA_DISABLE", "1")
+        speculative_attention_backend: str | None = None
 
         if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
             if "deepseek" in model_setup[1].lower():
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
                 m.delenv("VLLM_MLA_DISABLE", raising=False)
                 attention_config = {"backend": "TRITON_MLA"}
+                speculative_attention_backend = "TRITON_MLA"
             else:
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -449,16 +451,20 @@ def _run_eagle_correctness(
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
+        speculative_config = {
+            "method": method,
+            "model": spec_model_name,
+            "num_speculative_tokens": 3,
+            "max_model_len": max_model_len,
+        }
+        if speculative_attention_backend is not None:
+            speculative_config["attention_backend"] = speculative_attention_backend
+
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
-            speculative_config={
-                "method": method,
-                "model": spec_model_name,
-                "num_speculative_tokens": 3,
-                "max_model_len": max_model_len,
-            },
+            speculative_config=speculative_config,
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,
@@ -771,6 +777,13 @@ def test_mtp_correctness(
             method, model_name, tp_size = model_setup
             draft_model = None
         _skip_if_insufficient_gpus_for_tp(tp_size)
+
+        if (
+            model_name == "ZixiQi/DeepSeek-V3-4layers-MTP-FP8"
+            and current_platform.is_rocm()
+            and not current_platform.supports_fp8()
+        ):
+            pytest.skip("DeepSeek FP8-MoE MTP requires MI300+ on ROCm")
 
         if "Qwen3.5" in model_name and os.environ.get("VLLM_USE_V2_MODEL_RUNNER"):
             pytest.skip(

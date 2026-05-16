@@ -3,7 +3,11 @@
 import pytest
 from typing_extensions import LiteralString
 
+from vllm.platforms import current_platform
+
 from ..utils import compare_two_settings, create_new_process_for_each_test
+
+ATTN_BACKENDS = [None] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
 
 @pytest.mark.parametrize(
@@ -12,17 +16,12 @@ from ..utils import compare_two_settings, create_new_process_for_each_test
         (2, "JackFram/llama-160m"),
     ],
 )
-@pytest.mark.parametrize(
-    "ATTN_BACKEND",
-    [
-        "FLASH_ATTN",
-    ],
-)
+@pytest.mark.parametrize("ATTN_BACKEND", ATTN_BACKENDS)
 @create_new_process_for_each_test()
 def test_pp_cudagraph(
     PP_SIZE: int,
     MODEL_NAME: str,
-    ATTN_BACKEND: LiteralString,
+    ATTN_BACKEND: LiteralString | None,
 ):
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment
@@ -32,8 +31,9 @@ def test_pp_cudagraph(
         str(PP_SIZE),
         "--distributed-executor-backend",
         "mp",
-        f"--attention-backend={ATTN_BACKEND}",
     ]
+    if ATTN_BACKEND is not None:
+        cudagraph_args.append(f"--attention-backend={ATTN_BACKEND}")
 
     eager_args = cudagraph_args + ["--enforce-eager"]
 

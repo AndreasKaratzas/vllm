@@ -691,6 +691,17 @@ class RemoteOpenAIServer(RemoteVLLMServer):
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
+            if current_platform.is_rocm():
+                if (
+                    "CUDA_VISIBLE_DEVICES" in env_dict
+                    and "HIP_VISIBLE_DEVICES" not in env_dict
+                ):
+                    env["HIP_VISIBLE_DEVICES"] = env_dict["CUDA_VISIBLE_DEVICES"]
+                elif (
+                    "HIP_VISIBLE_DEVICES" in env_dict
+                    and "CUDA_VISIBLE_DEVICES" not in env_dict
+                ):
+                    env["CUDA_VISIBLE_DEVICES"] = env_dict["HIP_VISIBLE_DEVICES"]
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
         print(f"Environment variables: {env}")
@@ -1326,6 +1337,17 @@ def multi_process_parallel(
 
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
+    if current_platform.is_rocm():
+        # These tests set devices by global rank inside Ray workers. If Ray
+        # restricts each worker to its assigned GPU through ROCm visibility
+        # variables, rank 1 sees only logical cuda:0 and cuda:1 is invalid.
+        for env_var in (
+            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+            "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
+            "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+        ):
+            os.environ[env_var] = "1"
+
     # NOTE: We need to set working_dir for distributed tests,
     # otherwise we may get import errors on ray workers
     # NOTE: Force ray not to use gitignore file as excluding, otherwise
@@ -1614,8 +1636,14 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 }
             )
 
+            skip_marker = "__VLLM_CHILD_PYTEST_SKIP__\n"
             child_script = (
-                "import sys, importlib, cloudpickle, traceback\n"
+                "import asyncio, inspect, os, sys, importlib, cloudpickle, "
+                "traceback, torch.multiprocessing as mp\n"
+                "try:\n"
+                "    mp.set_start_method('spawn')\n"
+                "except RuntimeError:\n"
+                "    pass\n"
                 "try:\n"
                 "    from _pytest.outcomes import Skipped\n"
                 "except ImportError:\n"
@@ -1626,19 +1654,28 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 "for name in data['qualname'].split('.'):\n"
                 "    target = getattr(target, name)\n"
                 "try:\n"
-                "    target(*data['args'], **data['kwargs'])\n"
-                "except Skipped:\n"
+                "    result = target(*data['args'], **data['kwargs'])\n"
+                "    if inspect.isawaitable(result):\n"
+                "        asyncio.run(result)\n"
+                "except Skipped as exc:\n"
+                "    with open(data['tb_file'], 'w') as fp:\n"
+                f"        fp.write({skip_marker!r} + str(exc))\n"
                 "    sys.exit(0)\n"
                 "except BaseException:\n"
                 "    with open(data['tb_file'], 'w') as fp:\n"
                 "        fp.write(traceback.format_exc())\n"
                 "    sys.exit(1)\n"
+                "else:\n"
+                "    sys.stdout.flush()\n"
+                "    sys.stderr.flush()\n"
+                "    os._exit(0)\n"
             )
 
             repo_root = str(VLLM_PATH.resolve())
             env = os.environ.copy()
             env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
             env[_SPAWN_CHILD_ENV] = "1"
+            env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
             result = subprocess.run(
                 [sys.executable, "-c", child_script],
@@ -1646,12 +1683,16 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                 env=env,
             )
 
+            try:
+                with open(tb_file) as fp:
+                    tb = fp.read()
+            except OSError:
+                tb = ""
+
+            if result.returncode == 0 and tb.startswith(skip_marker):
+                pytest.skip(tb[len(skip_marker) :])
+
             if result.returncode != 0:
-                try:
-                    with open(tb_file) as fp:
-                        tb = fp.read()
-                except OSError:
-                    tb = ""
                 if not tb:
                     tb = "<no Python traceback; see subprocess output above>"
                 raise RuntimeError(
@@ -1748,14 +1789,18 @@ def multi_gpu_marks(*, num_gpus: int):
     return [test_selector, test_skipif]
 
 
-def multi_gpu_test(*, num_gpus: int):
+def multi_gpu_test(
+    *,
+    num_gpus: int,
+    method: Literal["spawn", "fork"] | None = None,
+):
     """
     Decorate a test to be run only when multiple GPUs are available.
     """
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        func = create_new_process_for_each_test()(f)
+        func = create_new_process_for_each_test(method)(f)
         for mark in reversed(marks):
             func = mark(func)
 

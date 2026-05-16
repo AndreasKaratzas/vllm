@@ -226,13 +226,8 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         )
 
         if "input_features" in processed_outputs:
-            # Padding enables audio_tower to run in batched mode
-            processed_outputs["input_features_padded"] = processed_outputs[
-                "input_features"
-            ]
-
-            # Unpad features here since we need the output of each item to be
-            # independent of other items for the cache to work correctly
+            # Unpad features here since we need the cached output of each item
+            # to be independent of the other items in the HF processor batch.
             unpadded_features = [
                 f[mask]
                 for f, mask in zip(
@@ -240,6 +235,13 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
                     processed_outputs["input_features_mask"],
                 )
             ]
+            unpadded_masks = [
+                mask[mask] for mask in processed_outputs["input_features_mask"]
+            ]
+            # Padding is restored when multimodal items are merged for model
+            # execution so that audio_tower can still run in batched mode.
+            processed_outputs["input_features_padded"] = unpadded_features
+            processed_outputs["input_features_mask"] = unpadded_masks
             processed_outputs["input_features"] = unpadded_features
         return processed_outputs
 
@@ -250,8 +252,12 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            input_features_padded=MultiModalFieldConfig.batched("audio"),
-            input_features_mask=MultiModalFieldConfig.batched("audio"),
+            input_features_padded=MultiModalFieldConfig.batched_pad(
+                "audio", padding_value=-11.5
+            ),
+            input_features_mask=MultiModalFieldConfig.batched_pad(
+                "audio", padding_value=False
+            ),
         )
 
     def _get_prompt_updates(

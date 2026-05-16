@@ -14,6 +14,7 @@ from vllm.multimodal.inputs import (
     MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+    MultiModalPaddedBatchedField,
     MultiModalSharedField,
     NestedTensors,
 )
@@ -122,9 +123,13 @@ def test_multimodal_kwargs():
         torch.zeros(1000, dtype=torch.int32),
         MultiModalFlatField(slices=[slice(1, 2, 3), slice(4, 5, 6)], dim=2),
     )
+    e5 = MultiModalFieldElem(
+        [torch.zeros(2, dtype=torch.float32), torch.ones(3, dtype=torch.float32)],
+        MultiModalPaddedBatchedField(padding_value=-1.0),
+    )
     mm = MultiModalKwargsItems(
         {
-            "audio": [MultiModalKwargsItem({"a0": e1})],
+            "audio": [MultiModalKwargsItem({"a0": e1, "a1": e5})],
             "video": [MultiModalKwargsItem({"v0": e2})],
             "image": [MultiModalKwargsItem({"i0": e3, "i1": e4})],
         }
@@ -142,8 +147,8 @@ def test_multimodal_kwargs():
 
     total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
 
-    # expected total encoding length, should be 14319, +-20 for minor changes
-    assert 14300 <= total_len <= 14340
+    # expected total encoding length, +-20 for minor changes
+    assert 14410 <= total_len <= 14460
     decoded = decoder.decode(encoded).mm[0]
     assert isinstance(decoded, MultiModalKwargsItems)
 
@@ -158,6 +163,8 @@ def test_multimodal_kwargs():
     mm_data = mm.get_data()
     decoded_data = decoded.get_data()
     assert all(nested_equal(mm_data[k], decoded_data[k]) for k in mm_data)
+    assert isinstance(decoded["audio"][0]["a1"].field, MultiModalPaddedBatchedField)
+    assert decoded["audio"][0]["a1"].field.padding_value == -1.0
 
 
 def nested_equal(a: NestedTensors, b: NestedTensors):

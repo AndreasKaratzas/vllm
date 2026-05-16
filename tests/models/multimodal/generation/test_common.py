@@ -317,11 +317,13 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
         marks=[
+            # issue_5.md: upstream Aria repo is missing vision_processor.py
+            # for the current processor load path.
             pytest.mark.skip(
-                reason="Aria needs to update for latest transformers, "
-                "must have a vision_processor.py."
-                "An issue has been filed:"
-                "https://huggingface.co/rhymes-ai/Aria/discussions/23"
+                reason=(
+                    "Aria HF processor metadata is missing; see issue_5.md "
+                    "and https://huggingface.co/rhymes-ai/Aria/discussions/23"
+                )
             ),
             large_gpu_mark(min_gb=64),
         ],
@@ -477,10 +479,13 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         auto_cls=AutoModelForCausalLM,
         marks=[
+            # issue_6.md: current GLM-4V baseline is tracked as a model-side
+            # failure rather than a ROCm-specific vLLM regression.
             pytest.mark.skip(
-                reason="The code for this model has a bug."
-                "Please see the issue here:"
-                "https://huggingface.co/zai-org/glm-4v-9b/discussions/46."
+                reason=(
+                    "GLM-4V HF/vLLM baseline is broken; see issue_6.md "
+                    "and https://huggingface.co/zai-org/glm-4v-9b/discussions/46"
+                )
             ),
             large_gpu_mark(min_gb=32),
         ],
@@ -529,10 +534,12 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         auto_cls=AutoModelForImageTextToText,
         marks=[
+            # issue_6.md: GLM-OCR output comparison fails on both AMD and NV.
             pytest.mark.skip(
-                reason="This test fails on both AMD and NV"
-                "hardware. please see the issue:"
-                "https://github.com/vllm-project/vllm/issues/42016"
+                reason=(
+                    "GLM-OCR multimodal baseline is broken; see issue_6.md "
+                    "and https://github.com/vllm-project/vllm/issues/42016"
+                )
             ),
             large_gpu_mark(min_gb=32),
         ],

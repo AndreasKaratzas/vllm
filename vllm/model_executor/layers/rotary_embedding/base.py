@@ -10,6 +10,16 @@ from vllm.model_executor.custom_op import CustomOp
 from .common import ApplyRotaryEmb
 
 
+def _reshape_for_rope(
+    x: torch.Tensor,
+    num_tokens: int,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Size]:
+    origin_shape = x.shape
+    num_heads = x.numel() // (num_tokens * head_size)
+    return x.reshape(num_tokens, num_heads, head_size), origin_shape
+
+
 # --8<-- [start:rotary_embedding]
 @CustomOp.register("rotary_embedding")
 class RotaryEmbeddingBase(CustomOp):
@@ -152,8 +162,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         cos_sin = cos_sin_cache.index_select(0, positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
 
-        query_shape = query.shape
-        query = query.view(num_tokens, -1, head_size)
+        query, query_shape = _reshape_for_rope(query, num_tokens, head_size)
         query_rot = query[..., :rotary_dim]
         query_pass = query[..., rotary_dim:]
         query_rot = ApplyRotaryEmb.forward_static(
@@ -166,8 +175,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
 
         # key may be None in some cases, e.g. cross-layer KV sharing
         if key is not None:
-            key_shape = key.shape
-            key = key.view(num_tokens, -1, head_size)
+            key, key_shape = _reshape_for_rope(key, num_tokens, head_size)
             key_rot = key[..., :rotary_dim]
             key_pass = key[..., rotary_dim:]
             key_rot = ApplyRotaryEmb.forward_static(

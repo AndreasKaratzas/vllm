@@ -134,7 +134,9 @@ class OpenAIClientMtebEncoder(MtebEmbedMixin):
         sentences = [sentences[i] for i in r]
 
         embeddings = self.client.embeddings.create(
-            model=self.model_name, input=sentences
+            model=self.model_name,
+            input=sentences,
+            encoding_format="float",
         )
         outputs = [d.embedding for d in embeddings.data]
         embeds = np.array(outputs)

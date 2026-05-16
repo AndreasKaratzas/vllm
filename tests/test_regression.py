@@ -30,10 +30,14 @@ from vllm.platforms import current_platform
 )
 def test_max_tokens_none(model):
     sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=None)
+    rocm_kwargs = {}
+    if current_platform.is_rocm():
+        rocm_kwargs["gpu_memory_utilization"] = 0.05
     llm = LLM(
         model=model,
         max_num_batched_tokens=4096,
         tensor_parallel_size=1,
+        **rocm_kwargs,
     )
     prompts = ["Just say hello!"]
     outputs = llm.generate(prompts, sampling_params=sampling_params)
@@ -42,7 +46,14 @@ def test_max_tokens_none(model):
 
 
 def test_gc():
-    llm = LLM(model="distilbert/distilgpt2", enforce_eager=True)
+    rocm_kwargs = {}
+    if current_platform.is_rocm():
+        rocm_kwargs["gpu_memory_utilization"] = 0.05
+    llm = LLM(
+        model="distilbert/distilgpt2",
+        enforce_eager=True,
+        **rocm_kwargs,
+    )
     del llm
 
     gc.collect()
@@ -64,7 +75,14 @@ def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
         # with 400 Client Error: Bad Request.
         m.setenv("HF_TOKEN", "")
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
-        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat", attention_backend=attn_backend)
+        rocm_kwargs = {}
+        if current_platform.is_rocm():
+            rocm_kwargs["gpu_memory_utilization"] = 0.05
+        llm = LLM(
+            model="qwen/Qwen1.5-0.5B-Chat",
+            attention_backend=attn_backend,
+            **rocm_kwargs,
+        )
 
         prompts = [
             "Hello, my name is",

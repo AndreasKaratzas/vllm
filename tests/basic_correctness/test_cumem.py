@@ -30,8 +30,8 @@ def test_python_error():
         # allocate 70% of the total memory
         x = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
         tensors.append(x)
-    # release the memory
-    allocator.sleep()
+    # release the memory without backing it up to CPU
+    allocator.sleep(offload_tags=tuple())
 
     # allocate more memory than the total memory
     y = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)

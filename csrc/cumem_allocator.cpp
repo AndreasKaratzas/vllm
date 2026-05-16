@@ -447,6 +447,7 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
     Py_XDECREF(py_result);
     Py_XDECREF(py_ptr);
+    PyGILState_Release(gstate);
     return;
   }
 
@@ -463,6 +464,7 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
     // PyArg_ParseTuple sets an error if it fails
     Py_XDECREF(py_result);
     Py_XDECREF(py_ptr);
+    PyGILState_Release(gstate);
     return;
   }
 
@@ -504,6 +506,10 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
         (CUmemGenericAllocationHandle*)PyLong_AsUnsignedLongLong(addr_py);
     chunk_sizes[i] = (unsigned long long)PyLong_AsUnsignedLongLong(size_py);
   }
+  bool already_unmapped = recv_size != 0;
+  for (Py_ssize_t i = 0; i < num_chunks; ++i) {
+    already_unmapped = already_unmapped && (chunk_sizes[i] == 0);
+  }
 
   // Drop temporary Python refs, then release the GIL before calling into
   // non-Python APIs.
@@ -511,7 +517,10 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   Py_DECREF(py_result);
   PyGILState_Release(gstate);
 
-  unmap_and_release(device, size, d_mem, p_memHandle, chunk_sizes, num_chunks);
+  if (recv_size != 0 && !already_unmapped) {
+    unmap_and_release(recv_device, recv_size, d_mem, p_memHandle, chunk_sizes,
+                      num_chunks);
+  }
 #else
   // Non-ROCm path: simple integer handle already extracted; drop temporary
   // Python refs while still holding the GIL, then release it.
@@ -525,10 +534,13 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
 #endif
 
   // free address and the handle
-  CUDA_CHECK(cuMemAddressFree(d_mem, size));
 #ifndef USE_ROCM
+  CUDA_CHECK(cuMemAddressFree(d_mem, size));
   free(p_memHandle);
 #else
+  if (recv_size != 0) {
+    CUDA_CHECK(cuMemAddressFree(d_mem, recv_size));
+  }
   for (auto i = 0; i < num_chunks; ++i) {
     free(p_memHandle[i]);
   }
@@ -647,6 +659,19 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
 
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle, chunk_sizes,
                     num_chunks);
+  if (error_code == 0) {
+    CUDA_CHECK(cuMemAddressFree(d_mem_ptr, recv_size));
+  }
+  if (error_code == 0) {
+    CUdeviceptr reserved_addr;
+    CUDA_CHECK(cuMemAddressReserve(&reserved_addr, recv_size, 0, d_mem_ptr, 0));
+    if (error_code == 0 && reserved_addr != d_mem_ptr) {
+      CUDA_CHECK(cuMemAddressFree(reserved_addr, recv_size));
+      error_code = CUresult(1);
+      snprintf(error_msg, sizeof(error_msg),
+               "Could not reserve the original ROCm VMM address");
+    }
+  }
 
   free(p_memHandle);
   free(chunk_sizes);

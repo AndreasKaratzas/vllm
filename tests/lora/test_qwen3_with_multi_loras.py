@@ -19,8 +19,6 @@ LORA_NAME_PATH_MAP = {
     "Cat": "charent/self_cognition_Bob",  # same as Bob
 }
 
-LORA_NAME_ID_MAP = {}
-INCREASE_LORA_ID = 0
 LORA_RANK = 8
 
 LORA_TEST_PROMPTS = ["What is GitHub?", "Hi, tell me about you"]
@@ -39,21 +37,21 @@ def format_chatml_messages(
     ]
 
 
-def make_add_lora_request(name: str, path: str):
-    global INCREASE_LORA_ID, LORA_NAME_ID_MAP
-
-    INCREASE_LORA_ID += 1
-    LORA_NAME_ID_MAP[name] = INCREASE_LORA_ID
-
-    return LoRARequest(
-        lora_name=name,
-        lora_int_id=INCREASE_LORA_ID,
-        lora_path=path,
-    )
-
-
 @multi_gpu_test(num_gpus=2)
 def test_multi_loras_with_tp_sync():
+    lora_name_id_map: dict[str, int] = {}
+    next_lora_id = 0
+
+    def make_tracked_lora_request(name: str):
+        nonlocal next_lora_id
+        next_lora_id += 1
+        lora_name_id_map[name] = next_lora_id
+        return LoRARequest(
+            lora_name=name,
+            lora_int_id=next_lora_id,
+            lora_path=LORA_NAME_PATH_MAP[name],
+        )
+
     llm = LLM(
         model=MODEL_PATH,
         enable_lora=True,
@@ -74,17 +72,17 @@ def test_multi_loras_with_tp_sync():
     # likes: `--lora-modules Alice=/path/to/Alice Bob=/path/to/Bob`
     run_check_lora(
         llm.llm_engine.add_lora,
-        make_add_lora_request("Alice", LORA_NAME_PATH_MAP["Alice"]),
+        make_tracked_lora_request("Alice"),
         [1],
     )
     run_check_lora(
         llm.llm_engine.add_lora,
-        make_add_lora_request("Bob", LORA_NAME_PATH_MAP["Bob"]),
+        make_tracked_lora_request("Bob"),
         [1, 2],
     )
     run_check_lora(
         llm.llm_engine.add_lora,
-        make_add_lora_request("Cat", LORA_NAME_PATH_MAP["Cat"]),
+        make_tracked_lora_request("Cat"),
         [1, 2, 3],
     )
 
@@ -94,7 +92,7 @@ def test_multi_loras_with_tp_sync():
     def call_llm_get_outputs(prompt: str, lora_name: str):
         lora_request = LoRARequest(
             lora_name=lora_name,
-            lora_int_id=LORA_NAME_ID_MAP[lora_name],
+            lora_int_id=lora_name_id_map[lora_name],
             lora_path=LORA_NAME_PATH_MAP[lora_name],
         )
         messages = format_chatml_messages(prompt)
@@ -117,11 +115,11 @@ def test_multi_loras_with_tp_sync():
         for dynamic lora loading and unloading
         """
         remove_lora_response = llm.llm_engine.remove_lora(
-            lora_id=LORA_NAME_ID_MAP[name]
+            lora_id=lora_name_id_map[name]
         )
 
         add_lora_response = llm.llm_engine.add_lora(
-            make_add_lora_request(name, LORA_NAME_PATH_MAP[name])
+            make_tracked_lora_request(name)
         )
 
         print(f"{remove_lora_response=}, {add_lora_response=}")

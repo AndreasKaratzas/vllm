@@ -503,6 +503,59 @@ class MultiModalBatchedField(BaseMultiModalField):
 
 
 @dataclass(frozen=True, kw_only=True)
+class MultiModalPaddedBatchedField(MultiModalBatchedField):
+    """
+    Info:
+        [`MultiModalFieldConfig.batched_pad`][vllm.multimodal.inputs.MultiModalFieldConfig.batched_pad]
+    """
+
+    padding_value: bool | int | float = 0
+
+    def _reduce_data(
+        self,
+        batch: list[NestedTensors],
+        *,
+        pin_memory: bool,
+    ) -> NestedTensors:
+        if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            batch = cast(list[torch.Tensor], batch)
+            if len(batch) == 1:
+                return batch[0].unsqueeze(0).contiguous()
+
+            if len({elem.ndim for elem in batch}) != 1:
+                return batch
+
+            first_shape = batch[0].shape
+            if all(elem.shape == first_shape for elem in batch):
+                out = torch.empty(
+                    (len(batch), *first_shape),
+                    dtype=batch[0].dtype,
+                    device=batch[0].device,
+                    pin_memory=pin_memory,
+                )
+                return torch.stack(batch, out=out)
+
+            max_shape = tuple(
+                max(elem.shape[dim] for elem in batch)
+                for dim in range(batch[0].ndim)
+            )
+            out = torch.full(
+                (len(batch), *max_shape),
+                self.padding_value,
+                dtype=batch[0].dtype,
+                device=batch[0].device,
+                pin_memory=pin_memory,
+            )
+            for i, elem in enumerate(batch):
+                slices = (i, *[slice(0, dim_size) for dim_size in elem.shape])
+                out[slices] = elem
+
+            return out
+
+        return batch
+
+
+@dataclass(frozen=True, kw_only=True)
 class MultiModalFlatField(BaseMultiModalField):
     """
     Info:
@@ -659,6 +712,25 @@ class MultiModalFieldConfig:
         """
         return MultiModalFieldConfig(
             field=MultiModalBatchedField(keep_on_cpu=keep_on_cpu),
+            modality=modality,
+        )
+
+    @staticmethod
+    def batched_pad(
+        modality: str,
+        *,
+        padding_value: bool | int | float = 0,
+        keep_on_cpu: bool = False,
+    ):
+        """
+        Defines a batched field that pads variable-shaped tensor elements
+        back to a rectangular batch when they are merged.
+        """
+        return MultiModalFieldConfig(
+            field=MultiModalPaddedBatchedField(
+                keep_on_cpu=keep_on_cpu,
+                padding_value=padding_value,
+            ),
             modality=modality,
         )
 

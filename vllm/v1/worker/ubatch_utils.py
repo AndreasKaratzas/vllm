@@ -46,6 +46,80 @@ def check_ubatch_thresholds(
         return num_tokens >= config.dbo_prefill_token_threshold
 
 
+def _get_ubatch_split_targets(
+    num_tokens_padded: int,
+    num_ubatches: int,
+    split_point: list[int] | int | None,
+) -> list[int]:
+    if isinstance(split_point, list):
+        assert len(split_point) == num_ubatches - 1
+        return [int(point) for point in split_point]
+
+    if split_point is None:
+        split_point = int(num_tokens_padded) // num_ubatches
+
+    return [int(split_point) * i for i in range(1, num_ubatches)]
+
+
+def _get_request_boundary_split_points(
+    num_scheduled_tokens: np.ndarray,
+    num_tokens_padded: int,
+    num_ubatches: int,
+    split_point: list[int] | int | None = None,
+) -> list[int] | None:
+    if num_ubatches <= 1:
+        return []
+
+    num_split_points = num_ubatches - 1
+    cu_num_tokens = np.zeros(len(num_scheduled_tokens) + 1, dtype=np.int32)
+    np.cumsum(num_scheduled_tokens, dtype=np.int32, out=cu_num_tokens[1:])
+    num_actual_tokens = int(cu_num_tokens[-1])
+
+    boundaries = []
+    last_boundary = 0
+    for boundary in cu_num_tokens[1:-1]:
+        boundary = int(boundary)
+        if last_boundary < boundary < num_actual_tokens:
+            boundaries.append(boundary)
+            last_boundary = boundary
+
+    if len(boundaries) < num_split_points:
+        return None
+
+    split_targets = _get_ubatch_split_targets(
+        num_tokens_padded, num_ubatches, split_point
+    )
+    split_points: list[int] = []
+    first_candidate = 0
+    for split_idx, target in enumerate(split_targets):
+        remaining_splits = num_split_points - split_idx - 1
+        last_candidate = len(boundaries) - remaining_splits
+        candidates = list(enumerate(boundaries[first_candidate:last_candidate]))
+        if not candidates:
+            return None
+
+        rel_idx, split = min(
+            candidates, key=lambda item: (abs(item[1] - target), item[1])
+        )
+        split_points.append(split)
+        first_candidate += rel_idx + 1
+
+    return split_points
+
+
+def can_create_request_aligned_ubatch_slices(
+    num_scheduled_tokens: np.ndarray,
+    num_tokens_padded: int,
+    num_ubatches: int,
+) -> bool:
+    return (
+        _get_request_boundary_split_points(
+            num_scheduled_tokens, num_tokens_padded, num_ubatches
+        )
+        is not None
+    )
+
+
 # This pads the last ubatch slice out to the total number of tokens
 # (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
 def _pad_out_ubatch_slices(
@@ -71,10 +145,11 @@ def maybe_create_ubatch_slices(
     if not should_ubatch:
         return None, None
 
-    if split_point is None:
-        split_point = int(num_tokens_padded) // num_ubatches
-
-    token_split_points = [split_point * i for i in range(1, num_ubatches)]
+    token_split_points = _get_request_boundary_split_points(
+        num_scheduled_tokens, num_tokens_padded, num_ubatches, split_point
+    )
+    if token_split_points is None:
+        return None, None
 
     # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
     # in cu_num_tokens directly (i.e. query_start_loc)

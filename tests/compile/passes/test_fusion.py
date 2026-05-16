@@ -194,6 +194,13 @@ class TestModel(torch.nn.Module):
         if self.group_shape.is_per_group():
             # Blockwise path
             if self.use_aiter_fusion and self.use_aiter_quant_op:
+                if any(
+                    getattr(layer.kernel, "use_triton", False)
+                    for layer in self.fp8_linear_layers
+                ):
+                    return [
+                        torch.ops.vllm.triton_per_token_group_quant_fp8.default
+                    ]
                 return [rocm_aiter_ops.get_group_quant_op()]
             if self.use_aiter_fusion:
                 return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
@@ -297,6 +304,10 @@ def _run_fusion_test(
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test on CUDA and ROCm"
 )
+@pytest.mark.skipif(
+    current_platform.is_rocm() and not current_platform.supports_fp8(),
+    reason="ROCm FP8 fusion tests require MI3xx FP8 support",
+)
 def test_fusion_rmsnorm_quant(
     dtype,
     hidden_size,
@@ -390,7 +401,11 @@ def test_fusion_rmsnorm_quant(
     "kernel_groupshape_quant", AITER_KERNEL_GROUPSHAPE_COMBINATIONS
 )
 @pytest.mark.skipif(
-    (not current_platform.is_rocm() or not IS_AITER_FOUND),
+    (
+        not current_platform.is_rocm()
+        or not current_platform.supports_fp8()
+        or not IS_AITER_FOUND
+    ),
     reason="Only test on ROCm with aiter package installed",
 )
 def test_aiter_fusion_rmsnorm_quant(

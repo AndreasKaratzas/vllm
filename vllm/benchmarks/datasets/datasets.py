@@ -31,7 +31,7 @@ from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
@@ -3089,9 +3089,28 @@ class MTBenchDataset(HuggingFaceDataset):
     """  # noqa: E501
 
     DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM
+    DATASET_FILE = "question.jsonl"
     SUPPORTED_DATASET_PATHS = {
         "philschmid/mt-bench",
     }
+
+    def load_data(self) -> None:
+        """Load MT-Bench from raw JSONL to avoid stale datasets metadata.
+
+        The CI cache can contain philschmid/mt-bench metadata serialized with
+        the legacy feature type "List", which datasets==3.6.0 cannot read.
+        The raw question.jsonl file has the small schema this sampler needs.
+        """
+        path = hf_hub_download(
+            repo_id=self.dataset_path,
+            filename=self.DATASET_FILE,
+            repo_type="dataset",
+        )
+        with open(path, encoding="utf-8") as f:
+            self.data = [json.loads(line) for line in f]
+
+        if not getattr(self, "disable_shuffle", False):
+            random.Random(self.random_seed).shuffle(self.data)
 
     def sample(
         self,

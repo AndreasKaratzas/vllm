@@ -18,15 +18,31 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from ...utils import create_new_process_for_each_test
 
 
+def _supports_gptq_marlin_fullgraph() -> bool:
+    if not is_quant_method_supported("gptq_marlin"):
+        return False
+
+    if not current_platform.is_rocm():
+        return True
+
+    from vllm.platforms.rocm import on_mi3xx
+
+    return on_mi3xx()
+
+
 def models_list(*, all: bool = True, keywords: list[str] | None = None):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
-        (
-            "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
-            {"dtype": torch.float16},
-        ),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
+
+    if current_platform.supports_fp8():
+        TEST_MODELS.append(
+            (
+                "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
+                {"dtype": torch.float16},
+            )
+        )
 
     if all:
         TEST_MODELS.extend(
@@ -50,7 +66,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
                 ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {"quantization": "gptq"})
             )
 
-        if is_quant_method_supported("gptq_marlin"):
+        if _supports_gptq_marlin_fullgraph():
             TEST_MODELS.append(
                 (
                     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
@@ -69,6 +85,24 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     # filter by keywords
     pred = lambda model: any(keyword in model[0] for keyword in keywords)
     return list(filter(pred, TEST_MODELS))
+
+
+def _fp8_kv_scale_mla_cases() -> list[tuple[str, AttentionBackendEnum]]:
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import is_aiter_found_and_supported
+
+        if is_aiter_found_and_supported():
+            return [
+                ("deepseek-ai/DeepSeek-V2-Lite", AttentionBackendEnum.ROCM_AITER_MLA)
+            ]
+        return []
+
+    if current_platform.is_cuda():
+        return [
+            ("deepseek-ai/DeepSeek-V2-Lite", AttentionBackendEnum.FLASHINFER_MLA)
+        ]
+
+    return []
 
 
 @pytest.mark.parametrize(
@@ -196,10 +230,7 @@ def test_custom_compile_config(
     "model, backend",
     [
         ("Qwen/Qwen2-0.5B", None),  # Standard attention model
-        (
-            "deepseek-ai/DeepSeek-V2-Lite",
-            AttentionBackendEnum.FLASHINFER_MLA,
-        ),  # MLA (Multi-head Latent Attention) model
+        *_fp8_kv_scale_mla_cases(),  # MLA (Multi-head Latent Attention) model
     ],
 )
 def test_fp8_kv_scale_compile(

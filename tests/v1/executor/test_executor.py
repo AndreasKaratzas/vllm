@@ -5,6 +5,7 @@ import asyncio
 import os
 from collections.abc import Callable
 from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +17,8 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
+from vllm.v1.executor.ray_utils import get_visible_devices_env_vars
 from vllm.v1.executor.uniproc_executor import (
     ExecutorWithExternalLauncher,
     UniProcExecutor,
@@ -41,6 +44,64 @@ def test_supports_async_scheduling_executor_with_external_launcher():
 
 def test_supports_async_scheduling_multiproc_executor():
     assert MultiprocExecutor.supports_async_scheduling() is True
+
+
+def test_uniproc_executor_shutdown_destroys_distributed(monkeypatch):
+    calls = []
+
+    class Worker:
+        def shutdown(self):
+            calls.append("worker")
+
+    executor = object.__new__(UniProcExecutor)
+    executor.driver_worker = Worker()
+
+    monkeypatch.setattr(
+        "vllm.v1.executor.uniproc_executor.destroy_model_parallel",
+        lambda: calls.append("model_parallel"),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.executor.uniproc_executor.destroy_distributed_environment",
+        lambda: calls.append("distributed"),
+    )
+
+    executor.shutdown()
+
+    assert calls == ["worker", "model_parallel", "distributed"]
+
+
+def test_ray_worker_visible_devices_env_vars_include_rocm_aliases(monkeypatch):
+    platform = SimpleNamespace(
+        device_control_env_var="CUDA_VISIBLE_DEVICES",
+        is_rocm=lambda: True,
+    )
+    monkeypatch.setattr("vllm.v1.executor.ray_utils.current_platform", platform)
+
+    assert get_visible_devices_env_vars("0,1") == {
+        "CUDA_VISIBLE_DEVICES": "0,1",
+        "HIP_VISIBLE_DEVICES": "0,1",
+    }
+
+
+def test_ray_executor_v2_keeps_ray_rocm_worker_visibility(monkeypatch):
+    platform = SimpleNamespace(
+        is_rocm=lambda: True,
+        ray_noset_device_env_vars=[
+            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+            "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
+        ],
+    )
+    monkeypatch.setattr("vllm.v1.executor.ray_executor_v2.current_platform", platform)
+
+    executor = object.__new__(RayExecutorV2)
+    executor.parallel_config = SimpleNamespace(
+        ray_runtime_env=None,
+        ray_workers_use_nsight=False,
+    )
+
+    runtime_env = executor._build_runtime_env()
+
+    assert runtime_env["env_vars"] == {}
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):

@@ -19,6 +19,7 @@ from vllm.distributed.parallel_state import (
     graph_capture,
     init_distributed_environment,
 )
+from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)
@@ -26,6 +27,7 @@ mp.set_start_method("spawn", force=True)
 
 def distributed_run(fn, world_size):
     number_of_processes = world_size
+    master_port = str(get_open_port())
     processes: list[mp.Process] = []
     for i in range(number_of_processes):
         env: dict[str, str] = {}
@@ -34,7 +36,7 @@ def distributed_run(fn, world_size):
         env["WORLD_SIZE"] = str(number_of_processes)
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
-        env["MASTER_PORT"] = "12345"
+        env["MASTER_PORT"] = master_port
         p = mp.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()

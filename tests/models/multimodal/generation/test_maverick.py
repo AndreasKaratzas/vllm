@@ -21,6 +21,7 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec
 
@@ -601,6 +602,13 @@ def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("tp,ep", [(2, True)])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(
+    current_platform.is_rocm() and not current_platform.supports_fp8(),
+    reason=(
+        "Llama-4-Maverick-FP8 uses FP8 MoE weights, but this ROCm platform "
+        "does not have a supported FP8 MoE backend."
+    ),
+)
 def test_dummy_maverick(
     monkeypatch,
     original_model_name: str,

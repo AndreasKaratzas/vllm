@@ -23,6 +23,7 @@ from vllm.distributed.parallel_state import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
 torch.manual_seed(42)
@@ -31,7 +32,9 @@ random.seed(44)
 test_size_elements = 1024 * 1024
 
 
-def symm_mem_allreduce_worker(local_rank: int, world_size: int, q: mp.Queue):
+def symm_mem_allreduce_worker(
+    local_rank: int, world_size: int, q: mp.Queue, master_port: str
+):
     monkeypatch = pytest.MonkeyPatch()
     config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=world_size))
 
@@ -48,7 +51,7 @@ def symm_mem_allreduce_worker(local_rank: int, world_size: int, q: mp.Queue):
                 "LOCAL_RANK": str(local_rank),
                 "WORLD_SIZE": str(world_size),
                 "MASTER_ADDR": "localhost",
-                "MASTER_PORT": "12345",
+                "MASTER_PORT": master_port,
             }
         )
 
@@ -108,7 +111,12 @@ def test_symm_mem_allreduce(
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     q = mp.get_context("spawn").Queue()
-    mp.spawn(symm_mem_allreduce_worker, args=(world_size, q), nprocs=world_size)
+    master_port = str(get_open_port())
+    mp.spawn(
+        symm_mem_allreduce_worker,
+        args=(world_size, q, master_port),
+        nprocs=world_size,
+    )
     try:
         val = q.get(timeout=1)
     except queue.Empty:

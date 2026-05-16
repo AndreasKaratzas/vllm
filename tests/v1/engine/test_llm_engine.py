@@ -16,6 +16,7 @@ else:
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
+ENGINE_TEST_GPU_MEMORY_UTILIZATION = 0.4
 
 
 def _vllm_model(
@@ -31,7 +32,7 @@ def _vllm_model(
         max_model_len=128,
         enforce_eager=True,
         enable_prefix_caching=apc,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=ENGINE_TEST_GPU_MEMORY_UTILIZATION,
         skip_tokenizer_init=skip_tokenizer_init,
     )
 
@@ -162,8 +163,12 @@ def test_engine_metrics(vllm_runner, example_prompts):
 
     with vllm_runner(
         MODEL,
+        dtype=DTYPE,
+        max_model_len=128,
+        enforce_eager=True,
         speculative_config=speculative_config,
         disable_log_stats=False,
+        gpu_memory_utilization=ENGINE_TEST_GPU_MEMORY_UTILIZATION,
     ) as vllm_model:
         llm: LLM = vllm_model.llm
         sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
@@ -213,7 +218,7 @@ def test_engine_metrics(vllm_runner, example_prompts):
         assert len(num_accepted_tokens_per_pos[0].values) == 5
 
 
-@pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
+@pytest.mark.parametrize("model", [MODEL])
 def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
     # of tokenizer and detokenizer. The generated output is expected to contain
@@ -222,6 +227,8 @@ def test_skip_tokenizer_initialization(model: str):
         model=model,
         skip_tokenizer_init=True,
         enforce_eager=True,
+        max_model_len=128,
+        gpu_memory_utilization=ENGINE_TEST_GPU_MEMORY_UTILIZATION,
     )
     sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
 

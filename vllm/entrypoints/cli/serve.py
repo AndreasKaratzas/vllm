@@ -307,15 +307,19 @@ def run_multi_api_server(args: argparse.Namespace):
         timeout = shutdown_by = None
         if shutdown_requested:
             timeout = vllm_config.shutdown_timeout
-            shutdown_by = time.monotonic() + timeout
-            logger.info("Waiting up to %d seconds for processes to exit", timeout)
+            process_timeout = max(timeout, 1.0)
+            shutdown_by = time.monotonic() + process_timeout
+            logger.info(
+                "Waiting up to %.1f seconds for processes to exit",
+                process_timeout,
+            )
 
         def to_timeout(deadline: float | None) -> float | None:
             return (
                 deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
             )
 
-        api_server_manager.shutdown(timeout=timeout)
+        api_server_manager.shutdown(timeout=to_timeout(shutdown_by))
         if local_engine_manager:
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:

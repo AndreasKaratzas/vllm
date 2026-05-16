@@ -170,6 +170,7 @@ def maybe_make_prepare_finalize(
         use_fp8_dispatch = (
             quant_config.quant_dtype == current_platform.fp8_dtype()
             and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+            and DeepEPLLPrepareAndFinalize.supports_native_fp8_dispatch()
         )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(

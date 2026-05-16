@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import pytest
 import torch
 from torch import fx as fx
 from torch import nn
 
 # This import automatically registers `torch.ops.silly.attention`
 import tests.compile.silly_attention  # noqa
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.passes.inductor_pass import (
@@ -25,6 +27,17 @@ from vllm.forward_context import set_forward_context
 
 BATCH_SIZE = 64
 MLP_SIZE = 128
+
+
+@pytest.fixture
+def disable_compile_cache():
+    # These tests assert that compilation passes are invoked for specific
+    # compile ranges. A vLLM AOT cache hit legitimately skips that path.
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+        envs.disable_envs_cache()
+        yield
+    envs.disable_envs_cache()
 
 
 @support_torch_compile
@@ -66,7 +79,7 @@ class PostGradRangeChecker(InductorPass):
         return InductorPass.hash_dict(state)
 
 
-def test_compile_ranges(use_fresh_inductor_cache):
+def test_compile_ranges(use_fresh_inductor_cache, disable_compile_cache):
     post_grad_range_checker = PostGradRangeChecker(
         [
             Range(start=1, end=8),
@@ -168,7 +181,9 @@ class PostGradStaticShapeChecker(InductorPass):
         return InductorPass.hash_dict(state)
 
 
-def test_compile_sizes_produce_static_shapes(use_fresh_inductor_cache):
+def test_compile_sizes_produce_static_shapes(
+    use_fresh_inductor_cache, disable_compile_cache
+):
     """Verify that compile_sizes entries are compiled with fully concrete
     shapes (no SymInts), while compile_ranges entries retain dynamic shapes."""
     checker = PostGradStaticShapeChecker()
@@ -209,10 +224,7 @@ def test_compile_sizes_produce_static_shapes(use_fresh_inductor_cache):
     )
 
 
-def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
-    # To force multiple compilations, we disable the compile cache
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
+def test_inductor_cache_compile_ranges(use_fresh_inductor_cache, disable_compile_cache):
     post_grad_range_checker = PostGradRangeChecker(
         ranges=[
             Range(start=1, end=8),

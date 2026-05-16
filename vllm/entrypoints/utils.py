@@ -211,12 +211,12 @@ def get_max_tokens(
 
 
 def log_non_default_args(args: Namespace | EngineArgs):
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
-
     non_default_args = {}
 
     # Handle Namespace
     if isinstance(args, Namespace):
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+
         parser = make_arg_parser(FlexibleArgumentParser())
         for arg, default in vars(parser.parse_args([])).items():
             if default != getattr(args, arg):

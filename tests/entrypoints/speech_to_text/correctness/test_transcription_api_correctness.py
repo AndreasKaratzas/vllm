@@ -21,6 +21,7 @@ from evaluate import load
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 from vllm.multimodal.audio import get_audio_duration
+from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 
 from ....models.registry import HF_EXAMPLE_MODELS
@@ -29,6 +30,7 @@ from ....utils import RemoteOpenAIServer
 # Tuned to prevent OOM on 18GB GPUs in transcription correctness tests.
 MAX_SEQS_FOR_TRANSCRIPTION_TEST = 8
 GPU_UTIL_FOR_TRANSCRIPTION_TEST = 0.5
+COHERE_ASR_MODEL = "CohereLabs/cohere-transcribe-03-2026"
 
 
 def to_bytes(y, sr):
@@ -170,9 +172,51 @@ def run_evaluation(
 @pytest.mark.parametrize(
     "model_config",
     [
-        ("openai/whisper-large-v3", 12.744980),
+        pytest.param(
+            {
+                "name": "openai/whisper-large-v3",
+                "expected_wer": 12.744980,
+            },
+            id="whisper-large-v3",
+        ),
         # CohereASR is used to test the variable encoder length code paths
-        ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        pytest.param(
+            {
+                "name": COHERE_ASR_MODEL,
+                "expected_wer": 11.92,
+            },
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="ROCm runs explicit attention backend coverage below.",
+            ),
+            id="cohere-default",
+        ),
+        # ROCm backend rows use backend-specific baselines; the CUDA/default
+        # CohereASR baseline above remains unchanged.
+        pytest.param(
+            {
+                "name": COHERE_ASR_MODEL,
+                "attention_backend": "TRITON_ATTN",
+                "expected_wer": 11.78,
+            },
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(),
+                reason="ROCm-specific Triton unified attention coverage.",
+            ),
+            id="cohere-rocm-triton-attn",
+        ),
+        pytest.param(
+            {
+                "name": COHERE_ASR_MODEL,
+                "attention_backend": "ROCM_AITER_UNIFIED_ATTN",
+                "expected_wer": 12.77,
+            },
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(),
+                reason="ROCm-specific AITER unified attention coverage.",
+            ),
+            id="cohere-rocm-aiter-unified-attn",
+        ),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -182,7 +226,10 @@ def run_evaluation(
 def test_wer_correctness(
     model_config, dataset_repo, n_examples=-1, max_concurrent_request=None
 ):
-    model_name, expected_wer = model_config
+    model_name = model_config["name"]
+    attention_backend = model_config.get("attention_backend")
+    expected_wer = model_config["expected_wer"]
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     # TODO refactor to use `ASRDataset`
     server_args = [
@@ -193,6 +240,8 @@ def test_wer_correctness(
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
+    if attention_backend is not None:
+        server_args.append(f"--attention-backend={attention_backend}")
     with RemoteOpenAIServer(
         model_name,
         server_args,

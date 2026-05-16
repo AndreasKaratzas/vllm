@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import tempfile
+from contextlib import ExitStack
 from functools import partial
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -51,6 +55,61 @@ OTHER_MODEL_ARCH_LIST = set(HF_EXAMPLE_MODELS.get_supported_archs()) - set(
     MINIMAL_MODEL_ARCH_LIST
 )
 
+FP8_MOE_INIT_REQUIRES_FP8_PLATFORM = {
+    "BailingMoeV2_5ForCausalLM",
+    "DeepseekV3ForCausalLM",
+    "DeepseekV32ForCausalLM",
+    "DeepSeekMTPModel",
+    "EagleDeepSeekMTPModel",
+    "Eagle3MiniMaxM2ForCausalLM",
+    "InternS1ProForConditionalGeneration",
+    "MiniMaxM2ForCausalLM",
+}
+
+
+def _initialize_kv_caches_for_initialization_test(self, vllm_config):
+    """Avoid model.forward() during initialization-only model registry tests."""
+    kv_cache_specs = self.model_executor.get_kv_cache_specs()
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        [10 * GiB_bytes],
+    )
+    scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+    vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+    kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+    if kv_cache_groups:
+        vllm_config.cache_config.block_size = min(
+            g.kv_cache_spec.block_size for g in kv_cache_groups
+        )
+
+    vllm_config.validate_block_size()
+    return scheduler_kv_cache_config
+
+
+def _install_spawned_engine_core_patch(m: pytest.MonkeyPatch, tmp_dir: str) -> None:
+    """Apply the KV-cache patch in EngineCore subprocesses created with spawn."""
+    sitecustomize = Path(tmp_dir) / "sitecustomize.py"
+    sitecustomize.write_text(
+        "\n".join(
+            [
+                "from tests.models.test_initialization import (",
+                "    _initialize_kv_caches_for_initialization_test,",
+                ")",
+                "from vllm.v1.engine.core import EngineCore",
+                "",
+                "EngineCore._initialize_kv_caches = (",
+                "    _initialize_kv_caches_for_initialization_test",
+                ")",
+                "",
+            ]
+        )
+    )
+    m.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [tmp_dir, os.environ.get("PYTHONPATH")])),
+    )
+
 
 @create_new_process_for_each_test()
 def can_initialize(
@@ -60,8 +119,8 @@ def can_initialize(
     the WARNING:
         "We must use the 'spawn' multiprocessing start method. Overriding
         VLLM_WORKER_MULTIPROC_METHOD to 'spawn'."
-    The spawn process causes the _initialize_kv_caches_v1 function below to
-    become ineffective.
+    The KV-cache initialization patch is also installed through sitecustomize
+    for EngineCore subprocesses that are created with spawn.
     """
 
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
@@ -78,25 +137,6 @@ def can_initialize(
         exist_overrides=model_info.hf_overrides,
         use_original_num_layers=getattr(model_info, "use_original_num_layers", False),
     )
-
-    # Avoid calling model.forward()
-    def _initialize_kv_caches_v1(self, vllm_config):
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
-        kv_cache_configs = get_kv_cache_configs(
-            vllm_config,
-            kv_cache_specs,
-            [10 * GiB_bytes],
-        )
-        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
-        if kv_cache_groups:
-            vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
-            )
-
-        vllm_config.validate_block_size()
-        return scheduler_kv_cache_config
 
     if model_arch == "MiniMaxVL01ForConditionalGeneration":
         pytest.skip(
@@ -130,10 +170,30 @@ def can_initialize(
                 f"capability {capability.major}.{capability.minor}"
             )
 
+    if model_arch in FP8_MOE_INIT_REQUIRES_FP8_PLATFORM:
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm() and not current_platform.supports_fp8():
+            pytest.skip(
+                f"{model_arch} uses an FP8 MoE checkpoint, but this ROCm "
+                "platform does not support FP8 inference kernels."
+            )
+
     with (
-        patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
+        patch.object(
+            V1EngineCore,
+            "_initialize_kv_caches",
+            _initialize_kv_caches_for_initialization_test,
+        ),
         monkeypatch.context() as m,
+        ExitStack() as stack,
     ):
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            _install_spawned_engine_core_patch(
+                m, stack.enter_context(tempfile.TemporaryDirectory())
+            )
         # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
         # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
         # L4 supports FA3.

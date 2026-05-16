@@ -32,6 +32,14 @@ AITER_MODEL_LIST = [
 ]
 
 
+def _should_test_rocm_aiter() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    return is_aiter_found_and_supported()
+
+
 # @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
     "model",
@@ -112,7 +120,7 @@ AITER_MODEL_LIST = [
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+    "use_rocm_aiter", [True, False] if _should_test_rocm_aiter() else [False]
 )
 @pytest.mark.parametrize("use_prompt_embeds", [True, False])
 def test_models(

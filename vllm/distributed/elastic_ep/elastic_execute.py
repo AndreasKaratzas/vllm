@@ -409,6 +409,8 @@ class ElasticEPScalingExecutor:
             for module in moe_modules:
                 if hasattr(module.quant_method, "old_quant_method"):
                     module._replace_quant_method(module.quant_method.old_quant_method)
+                else:
+                    module.rebuild_internal_moe_kernel_after_topology_change()
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
 
         eplb_model_state.communicator = create_eplb_communicator(
@@ -565,6 +567,11 @@ class ElasticEPScalingExecutor:
 
     def prepare_new_worker(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
+            for module in self.worker.model_runner.get_model().modules():
+                if not is_moe_layer(module):
+                    continue
+                module.update_expert_map()
+                module.rebuild_internal_moe_kernel_after_topology_change()
             prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
 
     def rewarm_workspace(self) -> None:

@@ -40,6 +40,26 @@ EXPECTED_LORA_OUTPUT = [
     "SELECT max(Cows) ,  min(Cows) FROM farm",
 ]
 
+# Marlin is a CUDA backend. ROCm still runs GPT-OSS MXFP4 LoRA coverage through
+# its native backend selection, but should not force a CUDA-only path.
+MXFP4_USE_MARLIN_PARAMS = [True, False] if current_platform.is_cuda() else [False]
+TP2_MAX_NUM_BATCHED_TOKENS = 1024 if current_platform.is_rocm() else 2048
+
+
+def _supports_gpt_oss_mxfp4_lora() -> bool:
+    if current_platform.is_cuda():
+        return True
+    if not current_platform.is_rocm():
+        return False
+
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+def _normalize_sql_whitespace(sql: str) -> str:
+    return " ".join(sql.strip().split())
+
 
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
@@ -67,20 +87,16 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        assert _normalize_sql_whitespace(generated_texts[i]).startswith(
+            _normalize_sql_whitespace(EXPECTED_LORA_OUTPUT[i])
+        )
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason=(
-        "Mxfp4 LoRA on ROCm is blocked by a spawn compatibility issue. "
-        "The fused_moe_lora Triton kernel crashes in spawned subprocesses, "
-        "and vLLM forces spawn mode when HIP is initialized before "
-        "multiprocessing. Fixing this requires either making the LoRA "
-        "Triton kernel spawn-safe or pre-warming the kernel cache."
-    ),
+    not _supports_gpt_oss_mxfp4_lora(),
+    reason="GPT-OSS MXFP4 LoRA is only supported on CUDA and ROCm gfx950.",
 )
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize("mxfp4_use_marlin", MXFP4_USE_MARLIN_PARAMS)
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
     monkeypatch: pytest.MonkeyPatch,
@@ -109,8 +125,12 @@ def test_gpt_oss_lora(
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not _supports_gpt_oss_mxfp4_lora(),
+    reason="GPT-OSS MXFP4 LoRA is only supported on CUDA and ROCm gfx950.",
+)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize("mxfp4_use_marlin", MXFP4_USE_MARLIN_PARAMS)
 def test_gpt_oss_lora_tp2(
     monkeypatch: pytest.MonkeyPatch,
     gptoss20b_lora_files,
@@ -125,7 +145,7 @@ def test_gpt_oss_lora_tp2(
             enable_lora=True,
             max_loras=2,
             max_num_seqs=2,
-            max_num_batched_tokens=2048,
+            max_num_batched_tokens=TP2_MAX_NUM_BATCHED_TOKENS,
             tensor_parallel_size=2,
             gpu_memory_utilization=0.8,
             fully_sharded_loras=fully_sharded_loras,

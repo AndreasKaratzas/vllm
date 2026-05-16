@@ -38,7 +38,9 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 123 * 456?",
+        input="What is 123 * 456? Answer with only the integer.",
+        reasoning={"effort": "low"},
+        temperature=0.0,
     )
     assert response is not None
     print("response: ", response)

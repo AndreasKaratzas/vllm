@@ -27,6 +27,7 @@ from vllm.v1.executor.ray_utils import (
     FutureWrapper,
     RayWorkerWrapper,
     detach_zero_copy_from_model_runner_output,
+    get_visible_devices_env_vars,
     initialize_ray_cluster,
     ray,
 )
@@ -316,11 +317,7 @@ class RayDistributedExecutor(Executor):
         #    unset.
         # Each worker will use local_rank to index into the visible devices.
         all_args_to_update_environment_variables = [
-            {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
+            get_visible_devices_env_vars(",".join(map(str, node_gpus[node_id])))
             for (node_id, _) in worker_node_and_gpu_ids
         ]
 

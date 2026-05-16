@@ -91,6 +91,40 @@ def should_skip(prefix: str, skip_modules: list[str]) -> bool:
     return False
 
 
+def _patch_torchao_rocm_fp8_arch_detection() -> None:
+    """Teach torchao versions that predate gfx950 support about MI355 FP8."""
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        return
+
+    try:
+        arch_name = torch.cuda.get_device_properties(0).gcnArchName
+    except RuntimeError:
+        return
+
+    if not arch_name.startswith("gfx950"):
+        return
+
+    try:
+        import torchao.float8.inference as torchao_float8_inference
+        import torchao.quantization.quant_api as torchao_quant_api
+        import torchao.utils as torchao_utils
+    except ImportError:
+        return
+
+    try:
+        if torchao_quant_api.is_MI300() and torchao_float8_inference.is_MI300():
+            return
+    except RuntimeError:
+        return
+
+    def _is_rocm_fp8_capable() -> bool:
+        return True
+
+    torchao_utils.is_MI300 = _is_rocm_fp8_capable
+    torchao_quant_api.is_MI300 = _is_rocm_fp8_capable
+    torchao_float8_inference.is_MI300 = _is_rocm_fp8_capable
+
+
 if torchao_version_at_least("0.15.0"):
     from torchao.prototype.tensor_conversion.api import (
         convert_to_packed_tensor_based_on_current_hardware,
@@ -269,6 +303,7 @@ def torchao_quantize_param_data(
     from torchao.quantization import quantize_
 
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
+    _patch_torchao_rocm_fp8_arch_detection()
     """
     Avoid real weight allocation for faster load, since we will
     end up setting it to param.

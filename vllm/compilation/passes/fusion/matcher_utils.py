@@ -311,6 +311,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
+        match_rocm_aiter_triton_group_quant: bool = False,
         is_tma_aligned: bool = False,
     ) -> None:
         if enabled is None:
@@ -334,7 +335,12 @@ class MatcherQuantFP8(MatcherCustomOp):
                     "ROCm aiter fusion pass currently supports "
                     "quantization operation with group_size 128"
                 )
-                self.QUANT_OP = rocm_aiter_ops.get_group_quant_op()
+                if match_rocm_aiter_triton_group_quant:
+                    self.QUANT_OP = (
+                        torch.ops.vllm.triton_per_token_group_quant_fp8.default
+                    )
+                else:
+                    self.QUANT_OP = rocm_aiter_ops.get_group_quant_op()
 
         else:
             assert quant_key in QUANT_OPS, (

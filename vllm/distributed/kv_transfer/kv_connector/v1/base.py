@@ -42,8 +42,8 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import torch
 
@@ -67,17 +67,24 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
-CopyBlocksOp = Callable[
-    [
-        dict[str, torch.Tensor],
-        dict[str, torch.Tensor],
-        list[int],
-        list[int],
-        Literal["h2d", "d2h"],
-    ],
-    None,
-]
+class CopyBlocksOp(Protocol):
+    """Host-transfer copy helper.
+
+    block_dim identifies where the KV block axis lives in the source and
+    destination tensors. NIXL's host buffers can be laid out blocks-first,
+    while the normal attention KV cache layout keeps blocks at dimension 1.
+    """
+
+    def __call__(
+        self,
+        src_kv_caches: dict[str, torch.Tensor],
+        dst_kv_caches: dict[str, torch.Tensor],
+        src_block_ids: list[int],
+        dst_block_ids: list[int],
+        direction: Literal["h2d", "d2h"],
+        *,
+        block_dim: int = 1,
+    ) -> None: ...
 
 logger = init_logger(__name__)
 

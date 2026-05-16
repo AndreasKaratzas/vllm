@@ -4,12 +4,17 @@
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 
 from ....utils import create_new_process_for_each_test
 
+CASCADE_ATTENTION_BACKENDS = (
+    ["ROCM_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN", "FLASHINFER"]
+)
+
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("attn_backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("attn_backend", CASCADE_ATTENTION_BACKENDS)
 def test_cascade_attention(example_system_message, attn_backend):
     prompt = "\n<User>: Implement fibonacci sequence in Python.\n<Claude>:"
 

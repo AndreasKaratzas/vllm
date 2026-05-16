@@ -19,7 +19,12 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.config.compilation import CompilationMode, PassConfig
+from vllm.config.compilation import (
+    CompilationMode,
+    DynamicShapesConfig,
+    DynamicShapesType,
+    PassConfig,
+)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -27,6 +32,8 @@ from vllm.utils.torch_utils import (
     is_torch_equal,
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+
+from ..utils import create_new_process_for_each_test
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -88,8 +95,9 @@ def test_custom_op():
         _ = CompilationConfig(custom_ops=["quant_fp8"])
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+# Run in a fresh process: CUDA keeps the historical fork path, while ROCm/XPU
+# use spawn because they cannot safely reinitialize from a forked child.
+@create_new_process_for_each_test()
 # NB: We don't test VLLM_DISABLE_COMPILE_CACHE=0 because that depends
 # on the state of the cache directory on the current machine, which
 # may be influenced by other tests.
@@ -116,8 +124,7 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+@create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "cudagraph_mode,num_cudagraph_captured",
     [
@@ -154,8 +161,7 @@ def test_use_cudagraphs(
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+@create_new_process_for_each_test()
 def test_stock_torch_compile(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -172,8 +178,7 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+@create_new_process_for_each_test()
 def test_no_compilation(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -189,8 +194,7 @@ def test_no_compilation(vllm_runner, monkeypatch):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
+@create_new_process_for_each_test()
 def test_enforce_eager(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -205,7 +209,7 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         pass
 
 
-@pytest.mark.forked
+@create_new_process_for_each_test()
 def test_torch_compile_disable(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("TORCH_COMPILE_DISABLE", "1")

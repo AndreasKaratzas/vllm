@@ -86,7 +86,11 @@
 #                                                   and to run plamo2 model in vLLM.                                                #
 #   * [Multi-Modal Models (Standard) 1-4]:                                                                                          #
 #     - Do NOT remove `VLLM_WORKER_MULTIPROC_METHOD=spawn` setting as ROCm requires this for certain models to function.            #
-#   * [Transformers Nightly Models]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock.                          #
+#   * [Multi-Modal Processor %N]: Shard the CPU processor suite and tensor-schema suite to keep broad metadata/model-processor       #
+#                                 checks below the AMD soft-fail timeout.                                                            #
+#   * [Transformers Nightly Models %N]: Shard pytest coverage.                                                                       #
+#   * [Transformers Nightly Examples]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock; keep example smoke      #
+#                                     commands in an unsharded step.                                                                 #
 #   * [Plugin Tests (2 GPUs)]:                                                                                                      #
 #     - {`pytest -v -s entrypoints/openai/test_oot_registration.py`}: It needs a clean process                                      #
 #     - {`pytest -v -s models/test_oot_registration.py`}: It needs a clean process                                                  #
@@ -173,24 +177,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
-
-- label: PyTorch Fullgraph # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  torch_nightly: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/compilation/
-  - vllm/model_executor/
-  - vllm/v1/attention/
-  - vllm/config/compilation.py
-  - csrc/
-  - tests/compile
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
 
 - label: PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
@@ -850,6 +836,7 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
   - vllm/v1/worker/kv_connector_model_runner_mixin.py
+  - vllm/v1/worker/gpu_model_runner.py
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -1000,6 +987,24 @@ steps:
   - pytest -v -s benchmarks/
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
+
+- label: PyTorch Fullgraph # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/
+  - vllm/v1/attention/
+  - vllm/config/compilation.py
+  - csrc/
+  - tests/compile
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s compile/fullgraph/test_full_graph.py
 
 - label: Fusion E2E Config Sweep (H100-MI300) # TBD
   timeout_in_minutes: 180
@@ -1224,6 +1229,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+  - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
@@ -1406,6 +1412,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   - vllm/model_executor/model_loader/
+  - tools/install_torchcodec_rocm.sh
   commands:
   - bash ../tools/install_torchcodec_rocm.sh || exit 1
   - pytest -s entrypoints/openai/correctness/
@@ -1787,20 +1794,21 @@ steps:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
-- label: Multi-Modal Models (Extended Generation 1) # TBD
+- label: Multi-Modal Models (Extended Generation 1) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-  - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s models/multimodal/test_mapping.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 
 - label: Multi-Modal Models (Extended Generation 2) # TBD
@@ -1813,9 +1821,8 @@ steps:
   - vllm/
   - tests/models/multimodal/generation
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-  - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 
 - label: Multi-Modal Models (Extended Generation 3) # TBD
@@ -1878,11 +1885,12 @@ steps:
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
-- label: Multi-Modal Processor # 1h 42m
+- label: Multi-Modal Processor %N # 1h 42m
   timeout_in_minutes: 138
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
+  parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1890,14 +1898,15 @@ steps:
   - tests/models/registry.py
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+  - pytest -v -s models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: Multi-Modal Processor (CPU) # TBD
+- label: Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   no_gpu: true
   optional: true
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1905,7 +1914,7 @@ steps:
   - tests/models/registry.py
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Quantized Models Test # TBD
   timeout_in_minutes: 180
@@ -1921,7 +1930,31 @@ steps:
   commands:
   - pytest -v -s models/quantization
 
-- label: Transformers Nightly Models # TBD
+- label: Transformers Nightly Models %N # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  parallelism: 3
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/multimodal/
+  - vllm/model_executor/layers/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/models/
+  commands:
+  - pip install --upgrade git+https://github.com/huggingface/transformers
+  - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s tests/models/test_transformers.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s tests/models/multimodal/test_mapping.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+- label: Transformers Nightly Examples # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
@@ -1936,14 +1969,9 @@ steps:
   - vllm/v1/attention/selector.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
-  - tests/models/
   - examples/
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_initialization.py
-  - pytest -v -s tests/models/test_transformers.py
-  - pytest -v -s tests/models/multimodal/processing/
-  - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
   - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
@@ -2292,6 +2320,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -2415,7 +2444,8 @@ steps:
   - vllm/
   - tests/v1/e2e
   commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 e2e (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
@@ -2441,6 +2471,7 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: Weight Loading Multiple GPU - Large Models # TBD
@@ -2454,6 +2485,7 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large-amd.txt
 
 #########################################################################################################################################
@@ -2620,7 +2652,7 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
@@ -3111,11 +3143,12 @@ steps:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
-- label: Multi-Modal Models (Extended Generation 1) # TBD
+- label: Multi-Modal Models (Extended Generation 1) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3123,8 +3156,8 @@ steps:
   - tests/models/multimodal/test_mapping.py
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
-  - pytest -v -s models/multimodal/test_mapping.py
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s models/multimodal/test_mapping.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
@@ -3325,6 +3358,7 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
   - vllm/v1/worker/kv_connector_model_runner_mixin.py
+  - vllm/v1/worker/gpu_model_runner.py
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:

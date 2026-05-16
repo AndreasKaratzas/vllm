@@ -32,20 +32,35 @@ HOPPER_MXFP4_BF16_AVAILABLE = (
 ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = False
+ROCM_DYNAMIC_MXFP4_QUANT_AVAILABLE = False
+ROCM_MXFP4_UPCAST_AVAILABLE = False
 ROCM_GFX950 = False
 
 if ROCM_AVAILABLE:
-    from vllm._aiter_ops import rocm_aiter_ops
+    import vllm.envs as envs
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
     from vllm.platforms.rocm import on_gfx950
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
     ROCM_GFX950 = on_gfx950()
-    ROCM_AITER_AVAILABLE = rocm_aiter_ops.is_enabled()
+    # Explicit AITER backend tests should run when AITER can be used on this
+    # machine, even though vLLM's default VLLM_ROCM_USE_AITER gate is off.
+    ROCM_AITER_AVAILABLE = is_aiter_found_and_supported()
 
-    if ROCM_AITER_AVAILABLE:
-        from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
+    try:
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+        ROCM_DYNAMIC_MXFP4_QUANT_AVAILABLE = True
+    except ImportError:
+        pass
+
+    try:
+        from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
+
+        ROCM_MXFP4_UPCAST_AVAILABLE = True
+    except ImportError:
+        pass
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (
@@ -76,6 +91,27 @@ class ModelCase:
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+@pytest.fixture
+def enable_rocm_aiter_for_test():
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        enabled = False
+
+        def enable() -> None:
+            nonlocal enabled
+            if not ROCM_AVAILABLE:
+                return
+            enabled = True
+            monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+            envs.disable_envs_cache()
+            rocm_aiter_ops.refresh_env_variables()
+
+        yield enable
+
+    if enabled:
+        envs.disable_envs_cache()
+        rocm_aiter_ops.refresh_env_variables()
 
 
 @pytest.mark.parametrize(
@@ -1261,13 +1297,14 @@ def test_rocm_mxfp4_moe_oracle(
     num_tokens: int,
     hidden_size: int,
     intermediate_size: int,
+    enable_rocm_aiter_for_test,
 ):
     """
     Test ROCm MXFP4 MoE using oracle functions.
 
     This test validates that the oracle functions work end-to-end:
     - select_mxfp4_moe_backend() selects a valid backend
-    - convert_to_mxfp4_moe_kernel_format() converts weights without error
+    - The backend-specific weight converter converts weights without error
     - make_mxfp4_moe_quant_config() builds a valid quant config
     - make_mxfp4_moe_kernel() creates a kernel that runs without error
     - The kernel output is within accuracy tolerance of reference
@@ -1277,17 +1314,24 @@ def test_rocm_mxfp4_moe_oracle(
     # Check platform requirements
     if not ROCM_TRITON_KERNELS_AVAILABLE:
         pytest.skip("triton_kernels required for quantization")
+    if not ROCM_DYNAMIC_MXFP4_QUANT_AVAILABLE:
+        pytest.skip("aiter dynamic_mxfp4_quant required for test weight setup")
+    if not ROCM_MXFP4_UPCAST_AVAILABLE:
+        pytest.skip("aiter upcast_from_mxfp required for reference dequantization")
     if config["requires_aiter"] and not ROCM_AITER_AVAILABLE:
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
+    if config["requires_aiter"]:
+        enable_rocm_aiter_for_test()
 
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
         backend_to_kernel_cls,
-        convert_to_mxfp4_moe_kernel_format,
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        convert_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_kernel,
         make_mxfp4_moe_quant_config,
     )
@@ -1386,8 +1430,12 @@ def test_rocm_mxfp4_moe_oracle(
     layer.w2_input_scale = w2_input_scale
 
     # Convert weights using oracle
+    convert_weights = convert_weight_to_mxfp4_moe_kernel_format
+    if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
+        convert_weights = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format
+
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
-        convert_to_mxfp4_moe_kernel_format(
+        convert_weights(
             mxfp4_backend=backend,
             layer=layer,  # type: ignore[arg-type]
             w13_weight=w13_quant,
@@ -1423,7 +1471,6 @@ def test_rocm_mxfp4_moe_oracle(
             mxfp4_backend=backend,
             experts_cls=experts_cls,
             routing_tables=None,
-            shared_experts=None,
         )
 
         # Create inputs

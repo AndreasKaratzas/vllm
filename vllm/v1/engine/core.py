@@ -2045,6 +2045,7 @@ class EngineCoreActorMixin:
         # https://github.com/ray-project/ray/pull/40461/files#diff-31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860 # noqa: E501
         # and get_accelerator_ids_for_accelerator_resource() in worker.py
         # of ray.
+        self._set_nixl_side_channel_host()
         self._set_visible_devices(vllm_config, local_dp_rank)
 
     @staticmethod
@@ -2078,6 +2079,10 @@ class EngineCoreActorMixin:
                 device_control_env_var, local_dp_rank, world_size
             )
             os.environ[device_control_env_var] = value
+            from vllm.platforms import current_platform
+
+            if current_platform.is_rocm():
+                os.environ["HIP_VISIBLE_DEVICES"] = value
         except IndexError as e:
             raise Exception(
                 f"Error setting {device_control_env_var}: "

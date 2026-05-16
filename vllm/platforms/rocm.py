@@ -114,6 +114,22 @@ def _sync_hip_cuda_env_vars():
 
     if hip_val is not None and cuda_val is not None:
         if hip_val != cuda_val:
+            # Ray GPU actors on ROCm may inherit the driver's broad
+            # CUDA_VISIBLE_DEVICES while Ray narrows HIP_VISIBLE_DEVICES for
+            # the actor. Ray workers have these markers; the driver does not.
+            if (
+                os.environ.get("RAY_JOB_ID") is not None
+                and os.environ.get("RAY_RAYLET_PID") is not None
+            ):
+                logger.info(
+                    "Ray worker has HIP_VISIBLE_DEVICES=%r and "
+                    "CUDA_VISIBLE_DEVICES=%r; mirroring HIP visibility into "
+                    "CUDA_VISIBLE_DEVICES.",
+                    hip_val,
+                    cuda_val,
+                )
+                os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
+                return
             raise ValueError(
                 f"Inconsistent GPU visibility env vars: "
                 f"HIP_VISIBLE_DEVICES='{hip_val}' vs "
@@ -800,7 +816,10 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return on_gfx9() or on_gfx12x()
+        # FP8 tensor dtypes exist more broadly, but the FP8 inference paths
+        # rely on scaled-mm kernels that PyTorch/ROCm only supports on MI300+
+        # and newer OCP-FP8 architectures.
+        return on_mi3xx() or on_gfx12x()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
@@ -894,10 +913,15 @@ class RocmPlatform(Platform):
         dst_cache: torch.Tensor,
         src_block_indices: torch.Tensor,
         dst_block_indices: torch.Tensor,
+        block_dim: int = 1,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on GPU."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+        _src_cache = torch.index_select(src_cache, block_dim, src_block_indices)
+        dst_cache.index_copy_(
+            block_dim,
+            dst_block_indices.to(dst_cache.device),
+            _src_cache.to(dst_cache.device),
+        )
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -906,10 +930,15 @@ class RocmPlatform(Platform):
         dst_cache: torch.Tensor,
         src_block_indices: torch.Tensor,
         dst_block_indices: torch.Tensor,
+        block_dim: int = 1,
     ) -> None:
         """Copy blocks from GPU to host (CPU)."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        _src_cache = torch.index_select(src_cache, block_dim, src_block_indices)
+        dst_cache.index_copy_(
+            block_dim,
+            dst_block_indices.to(dst_cache.device),
+            _src_cache.to(dst_cache.device),
+        )
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -941,10 +970,13 @@ class RocmPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
+        # AITER RMSNorm is only enabled by default on the MI300-family archs
+        # where the AITER package is considered supported. This keeps the IR
+        # default aligned with _aiter_ops.is_aiter_found_and_supported().
         # TODO(luka/TJ) remove env vars completely
         if (
-            cc.cudagraph_mode != CUDAGraphMode.NONE
+            on_mi3xx()
+            and cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
         ):

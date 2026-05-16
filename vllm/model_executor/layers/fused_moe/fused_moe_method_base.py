@@ -48,6 +48,18 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
         )
 
+    def rebuild_moe_kernel_after_topology_change(
+        self, layer: torch.nn.Module
+    ) -> bool:
+        """Rebuild internal modular-kernel state after EP/DP topology changes.
+
+        Most quantization methods still use the external modular wrapper and
+        are rebuilt through prepare_communication_buffer_for_model(). Methods
+        that own an internal MoE kernel should override this hook when their
+        prepare/finalize state depends on the active parallel groups.
+        """
+        return False
+
     @abstractmethod
     def create_weights(
         self,

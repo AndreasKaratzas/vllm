@@ -13,6 +13,7 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.config.model import ModelConfig
+from vllm.platforms import current_platform
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -149,10 +150,15 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(gate_up_proj.quant_method, ModelOptFp8PcPtLinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8PcPtLinearMethod)
 
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            expected_fp8_dtype = (
+                torch.float8_e4m3fnuz
+                if current_platform.is_fp8_fnuz()
+                else torch.float8_e4m3fn
+            )
+            assert qkv_proj.weight.dtype == expected_fp8_dtype
+            assert o_proj.weight.dtype == expected_fp8_dtype
+            assert gate_up_proj.weight.dtype == expected_fp8_dtype
+            assert down_proj.weight.dtype == expected_fp8_dtype
 
             # Per-channel scales; activations are dynamically scaled per token.
             assert hasattr(qkv_proj, "weight_scale")

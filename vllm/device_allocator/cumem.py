@@ -53,6 +53,7 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    mapped: bool = True
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -160,13 +161,22 @@ class CuMemAllocator:
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
+        handle = data.handle
         logger.debug(
             "Freed %s bytes for %s with address %s from cumem allocator",
-            data.handle[1],
+            handle[1],
             data.tag,
             ptr,
         )
-        return data.handle
+        if not data.mapped and isinstance(handle[3], list):
+            # The allocation was already unmapped by sleep(). On ROCm the
+            # fourth handle field is a list of per-chunk handle pointers.
+            # Preserve those pointers for native cleanup, but zero the chunk
+            # sizes to tell the free callback that only the reserved address
+            # and handle bookkeeping remain.
+            released_chunks = [(chunk[0], 0) for chunk in handle[3]]
+            return (handle[0], handle[1], handle[2], released_chunks)
+        return handle
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """
@@ -205,6 +215,7 @@ class CuMemAllocator:
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+            data.mapped = False
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -232,6 +243,7 @@ class CuMemAllocator:
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
+                data.mapped = True
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:

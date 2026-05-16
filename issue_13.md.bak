@@ -1,0 +1,129 @@
+# MI355 gfx950 ROCm paged-attention query over-read
+
+## Summary
+
+On MI355/gfx950 with ROCm, `examples/basic/offline_inference/chat.py` crashed
+during vLLM engine initialization while the default full-decode CUDA graph
+envelope was being prepared for `meta-llama/Llama-3.2-1B-Instruct`.
+
+The first local mitigation capped graph size or routed large decode captures to
+Triton, but that was only a workaround. The real failure was an out-of-bounds
+query load in the native ROCm paged-attention `ll4mi` MFMA4 kernel.
+
+## Reproduction
+
+Run on MI355/gfx950 with access to the gated Llama model:
+
+```bash
+HF_TOKEN=<token> \
+HIP_VISIBLE_DEVICES=0 ROCR_VISIBLE_DEVICES=0 CUDA_VISIBLE_DEVICES=0 \
+PYTHONPATH=/app/vllm \
+python3 examples/basic/offline_inference/chat.py
+```
+
+Before the fix, the process completed mixed prefill/decode graph capture and
+then faulted as full decode graph preparation started:
+
+```text
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%
+Capturing CUDA graphs (decode, FULL): 2%
+Memory access fault by GPU node-2 ... Reason: Unknown.
+```
+
+## Root Cause
+
+The synchronized debug probe patched `paged_attention_rocm` and forced
+`torch.cuda.synchronize()` after each native kernel call. The failure happened
+before graph capture on the eager full-decode warmup for capture size 320.
+
+The failing call shape was:
+
+```text
+query:       (320, 32, 64), bf16, contiguous
+num_kv_heads=8
+GQA_RATIO=4
+HEAD_SIZE=64
+block_size=16
+max_seq_len=1
+```
+
+In `csrc/rocm/attention.cu`,
+`paged_attention_ll4mi_QKV_mfma4_kernel` loads query as `_B16x8` chunks. For
+`HEAD_SIZE=64`, each head has `HEAD_SIZE / 8 == 8` chunks. The kernel computed:
+
+```cpp
+const int qhead_elemh8 = laneid / 4;
+```
+
+On a wave64 this ranges from `0` through `15`. The final guarded load checked
+only that the GQA head index was valid:
+
+```cpp
+if (final_qhead_idx < GQA_RATIO) {
+  Qlocal[QHLOOP - 1] =
+      q_ptrh8[final_qhead_idx * HEAD_SIZE / 8 + qhead_elemh8];
+}
+```
+
+For `GQA_RATIO=4`, lanes 32..63 still had a valid `final_qhead_idx`, but their
+`qhead_elemh8` values were 8..15, beyond the 8 chunks in the head. On the last
+query row this read exactly one row past the tensor. The GPU fault address from
+the synchronized probe matched `query.data_ptr() + query.numel() *
+query.element_size()`.
+
+## Fix
+
+Keep the native ROCm path and guard the final query chunk load:
+
+```cpp
+if (final_qhead_idx < GQA_RATIO && qhead_elemh8 < HEAD_SIZE / 8) {
+  ...
+}
+```
+
+The inactive lanes now zero their local query chunk, matching the existing
+invalid-head behavior.
+
+## Validation
+
+Native synchronized probe:
+
+```bash
+PYTHONPATH=/app/vllm VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+HIP_VISIBLE_DEVICES=0 ROCR_VISIBLE_DEVICES=0 CUDA_VISIBLE_DEVICES=0 \
+HF_TOKEN=<token> \
+python3 scripts/debug_issue13_rocm_capture.py \
+  --max-model-len 4096 --max-cg 320 \
+  --log-rocm-paged-attn --log-rocm-paged-attn-limit 8 \
+  --sync-rocm-paged-attn --generate
+```
+
+Result:
+
+```text
+call=4 sync_ok
+Capturing CUDA graphs (decode, FULL): 100%
+[probe.generated] count=10
+[probe.done]
+```
+
+Exact Buildkite smoke command:
+
+```bash
+PYTHONPATH=/app/vllm \
+HIP_VISIBLE_DEVICES=0 ROCR_VISIBLE_DEVICES=0 CUDA_VISIBLE_DEVICES=0 \
+HF_TOKEN=<token> \
+python3 examples/basic/offline_inference/chat.py
+```
+
+Result:
+
+```text
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%
+Capturing CUDA graphs (decode, FULL): 100%
+Generated Outputs:
+...
+```
+
+The example keeps its upstream defaults. No graph cap, test skip, threshold
+change, or Triton fallback is needed for this issue.

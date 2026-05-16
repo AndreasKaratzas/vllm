@@ -20,6 +20,7 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -27,6 +28,16 @@ from ..utils import (
     multi_gpu_test,
     multi_process_parallel,
 )
+
+
+def _clear_ray_worker_visible_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These workers intentionally address devices by global rank. Keep the
+    # historical CUDA cleanup on every platform; ROCm also needs HIP/ROCR
+    # visibility cleared before the first accelerator call.
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    if current_platform.is_rocm():
+        for env_var in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            monkeypatch.delenv(env_var, raising=False)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -40,7 +51,7 @@ def all_reduce_test_worker(
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    _clear_ray_worker_visible_devices(monkeypatch)
 
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
@@ -67,7 +78,7 @@ def reduce_scatter_test_worker(
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    _clear_ray_worker_visible_devices(monkeypatch)
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -98,7 +109,7 @@ def all_gather_test_worker(
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    _clear_ray_worker_visible_devices(monkeypatch)
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -132,7 +143,7 @@ def broadcast_tensor_dict_test_worker(
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    _clear_ray_worker_visible_devices(monkeypatch)
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -169,7 +180,7 @@ def send_recv_tensor_dict_test_worker(
     rank: int,
     distributed_init_port: str,
 ):
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    _clear_ray_worker_visible_devices(monkeypatch)
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
@@ -315,7 +326,7 @@ def send_recv_test_worker(
     rank: int,
     distributed_init_port: str,
 ):
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    _clear_ray_worker_visible_devices(monkeypatch)
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)

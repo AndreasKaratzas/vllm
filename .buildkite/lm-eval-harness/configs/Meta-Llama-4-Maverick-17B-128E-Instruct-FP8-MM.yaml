@@ -8,5 +8,10 @@ tasks:
   - name: "relaxed_accuracy,none"
     # TODO(zhewenl): model card is 0.90, but the actual score is 0.80.
     value: 0.80
+# Some CI workers can carry an older ChartQA dataset_info.json using the
+# legacy feature type "List", which current datasets releases no longer read.
+# Refresh the dataset cache before evaluating; the benchmark and thresholds are
+# unchanged.
+force_dataset_redownload: true
 limit: 100
 num_fewshot: 0

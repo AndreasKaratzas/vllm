@@ -46,7 +46,11 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 class AiterRMSNormQuantPattern:
     def __init__(
-        self, epsilon: float, key: FusedRMSQuantKey, match_aiter_quant: bool = True
+        self,
+        epsilon: float,
+        key: FusedRMSQuantKey,
+        match_aiter_quant: bool = True,
+        match_aiter_triton_group_quant: bool = False,
     ):
         self.epsilon = epsilon
         self.quant_dtype = key.quant.dtype
@@ -55,6 +59,7 @@ class AiterRMSNormQuantPattern:
         self.quant_matcher = MatcherQuantFP8(
             key.quant,
             match_rocm_aiter=match_aiter_quant,
+            match_rocm_aiter_triton_group_quant=match_aiter_triton_group_quant,
         )
 
     def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
@@ -193,6 +198,7 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
         match_aiter_quant: bool = True,
+        match_aiter_triton_group_quant: bool = False,
         symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -201,7 +207,9 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(epsilon, key, match_aiter_quant)
+        super().__init__(
+            epsilon, key, match_aiter_quant, match_aiter_triton_group_quant
+        )
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -249,6 +257,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
         match_aiter_quant: bool = True,
+        match_aiter_triton_group_quant: bool = False,
         symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -257,7 +266,9 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(epsilon, key, match_aiter_quant)
+        super().__init__(
+            epsilon, key, match_aiter_quant, match_aiter_triton_group_quant
+        )
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -317,6 +328,7 @@ class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
         match_aiter_quant: bool = True,
+        match_aiter_triton_group_quant: bool = False,
         symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -325,7 +337,9 @@ class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(epsilon, key, match_aiter_quant)
+        super().__init__(
+            epsilon, key, match_aiter_quant, match_aiter_triton_group_quant
+        )
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -397,6 +411,7 @@ class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
         match_aiter_quant: bool = True,
+        match_aiter_triton_group_quant: bool = False,
         symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -405,7 +420,9 @@ class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(epsilon, key, match_aiter_quant)
+        super().__init__(
+            epsilon, key, match_aiter_quant, match_aiter_triton_group_quant
+        )
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -600,6 +617,23 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
             ).register(self.patterns)
 
+            if (
+                config.compilation_config.is_custom_op_enabled("quant_fp8")
+                and not current_platform.is_fp8_fnuz()
+            ):
+                for pattern_cls in (
+                    DoubleAiterRMSFp8GroupQuantPattern,
+                    DoubleAiterRMSFp8GroupQuantViewPattern,
+                    AiterRMSFp8GroupQuantPattern,
+                    AiterFusedAddRMSFp8GroupQuantPattern,
+                ):
+                    pattern_cls(
+                        epsilon,
+                        FP8_DTYPE,
+                        GroupShape(1, 128),
+                        match_aiter_triton_group_quant=True,
+                    ).register(self.patterns)
+
             # When quant_fp8 custom ops are disabled, both AITER and native
             # quant matchers trace through QuantFP8's native implementation.
             # Registering both variants would create duplicate Inductor
@@ -669,10 +703,15 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
 
     FUSED_SILU_MUL_QUANT_OP = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        match_aiter_triton_group_quant: bool = False,
+    ) -> None:
         self.silu_and_mul_matcher = MatcherSiluAndMul()
         self.quant_matcher = MatcherQuantFP8(
-            quant_key=kFp8Dynamic128Sym, match_rocm_aiter=True
+            quant_key=kFp8Dynamic128Sym,
+            match_rocm_aiter=True,
+            match_rocm_aiter_triton_group_quant=match_aiter_triton_group_quant,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -716,6 +755,14 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
         super().__init__(config, "rocm_aiter_silu_mul_fp8_group_quant_fusion_pass")
 
         self.register(AiterSiluMulFp8GroupQuantPattern())
+
+        if (
+            config.compilation_config.is_custom_op_enabled("quant_fp8")
+            and not current_platform.is_fp8_fnuz()
+        ):
+            self.register(
+                AiterSiluMulFp8GroupQuantPattern(match_aiter_triton_group_quant=True)
+            )
 
         self.dump_patterns(config, self.pm_pass)
 

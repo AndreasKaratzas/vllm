@@ -41,6 +41,10 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+def _get_text_config(config):
+    return config.get_text_config() if hasattr(config, "get_text_config") else config
+
+
 @support_torch_compile
 class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -50,7 +54,7 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         config = model_config.hf_config
-        text_config = config.text_config
+        text_config = _get_text_config(config)
 
         self.config = config
         lora_vocab = (
@@ -58,16 +62,20 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
             if lora_config
             else 0
         )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+        self.vocab_size = text_config.vocab_size + lora_vocab
+        self.org_vocab_size = text_config.vocab_size
 
         self.mtp_start_layer_idx = text_config.num_hidden_layers
-        self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
+        self.num_mtp_layers = getattr(
+            config,
+            "num_nextn_predict_layers",
+            getattr(text_config, "num_nextn_predict_layers", 1),
+        )
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             text_config.hidden_size,
-            org_num_embeddings=config.vocab_size,
+            org_num_embeddings=text_config.vocab_size,
         )
 
         self.fc = ColumnParallelLinear(
@@ -142,7 +150,7 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
 class Exaone4_5_MTP(ExaoneMoeMTP, SupportsMultiModal):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
-        text_config = config.text_config
+        text_config = _get_text_config(config)
         self.vllm_config = vllm_config
         self.quant_config = vllm_config.quant_config
 
@@ -151,17 +159,17 @@ class Exaone4_5_MTP(ExaoneMoeMTP, SupportsMultiModal):
         self.model = Exaone4_5MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
-        self.unpadded_vocab_size = config.vocab_size
+        self.unpadded_vocab_size = text_config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             text_config.hidden_size,
-            org_num_embeddings=config.vocab_size,
+            org_num_embeddings=text_config.vocab_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        if config.tie_word_embeddings:
+        if text_config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
+            self.unpadded_vocab_size, text_config.vocab_size
         )
 
     def embed_input_ids(

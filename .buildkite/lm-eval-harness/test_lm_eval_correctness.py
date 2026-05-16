@@ -15,10 +15,19 @@ from contextlib import contextmanager
 import lm_eval
 import pytest
 import yaml
+from datasets import DownloadMode
 
 from vllm.platforms import current_platform
 
 DEFAULT_RTOL = 0.08
+
+
+def _register_legacy_datasets_list_feature_type() -> None:
+    # HF datasets 3.6 removed the legacy "List" feature type, but some CI
+    # workers can still have older dataset_info.json files in the shared cache.
+    from datasets.features import features as datasets_features
+
+    datasets_features._FEATURE_TYPES.setdefault("List", datasets_features.LargeList)
 
 
 @contextmanager
@@ -47,7 +56,32 @@ def scoped_env_vars(new_env: dict[str, str]):
             os.environ.pop(key, None)
 
 
+def _lm_eval_task_specs(eval_config):
+    force_redownload = eval_config.get("force_dataset_redownload", False)
+    task_specs = []
+    for task in eval_config["tasks"]:
+        task_name = task["name"]
+        dataset_kwargs = dict(task.get("dataset_kwargs", {}))
+
+        if force_redownload or task.get("force_dataset_redownload", False):
+            dataset_kwargs["download_mode"] = DownloadMode.FORCE_REDOWNLOAD
+
+        if dataset_kwargs:
+            task_specs.append(
+                {
+                    "task": task_name,
+                    "dataset_kwargs": dataset_kwargs,
+                }
+            )
+        else:
+            task_specs.append(task_name)
+
+    return task_specs
+
+
 def launch_lm_eval(eval_config, tp_size):
+    _register_legacy_datasets_list_feature_type()
+
     trust_remote_code = eval_config.get("trust_remote_code", False)
     max_model_len = eval_config.get("max_model_len", 4096)
     batch_size = eval_config.get("batch_size", "auto")
@@ -73,7 +107,7 @@ def launch_lm_eval(eval_config, tp_size):
         results = lm_eval.simple_evaluate(
             model=backend,
             model_args=model_args,
-            tasks=[task["name"] for task in eval_config["tasks"]],
+            tasks=_lm_eval_task_specs(eval_config),
             num_fewshot=eval_config["num_fewshot"],
             limit=eval_config["limit"],
             # TODO(yeq): using chat template w/ fewshot_as_multiturn is supposed help

@@ -30,6 +30,102 @@ KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
 OPS = [chunked_prefill_paged_decode, context_attention_fwd]
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="Large physical block fallback is a ROCm Triton attention path.",
+)
+@torch.inference_mode()
+def test_chunked_prefill_paged_decode_large_physical_block_rocm() -> None:
+    torch.manual_seed(0)
+    device = CUDA_DEVICES[0]
+    torch.accelerator.set_device_index(device)
+
+    num_query_heads = 12
+    num_kv_heads = 4
+    head_size = 128
+    block_size = 128
+    seq_len = 129
+    num_blocks = (seq_len + block_size - 1) // block_size
+    x = 8
+
+    query = torch.randn(
+        1, num_query_heads, head_size, device=device, dtype=torch.float16
+    ) * 0.01
+    keys = torch.randn(
+        seq_len, num_kv_heads, head_size, device=device, dtype=torch.float16
+    ) * 0.01
+    values = torch.randn(
+        seq_len, num_kv_heads, head_size, device=device, dtype=torch.float16
+    ) * 0.01
+
+    k_cache = torch.zeros(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        device=device,
+        dtype=torch.float16,
+    )
+    v_cache = torch.zeros_like(k_cache)
+    for pos in range(seq_len):
+        block = pos // block_size
+        offset = pos % block_size
+        k_cache[block, offset] = keys[pos]
+        v_cache[block, offset] = values[pos]
+
+    k_cache = (
+        k_cache.view(num_blocks, block_size, num_kv_heads, head_size // x, x)
+        .permute(0, 2, 3, 1, 4)
+        .contiguous()
+    )
+    v_cache = v_cache.permute(0, 2, 3, 1).contiguous()
+
+    output = torch.empty_like(query)
+    block_table = torch.arange(num_blocks, device=device, dtype=torch.int32).view(
+        1, num_blocks
+    )
+    scale = 1.0 / (head_size**0.5)
+    chunked_prefill_paged_decode(
+        query=query,
+        key=torch.empty(1, num_kv_heads, head_size, device=device),
+        value=torch.empty(1, num_kv_heads, head_size, device=device),
+        output=output,
+        kv_cache_dtype="auto",
+        key_cache=k_cache,
+        value_cache=v_cache,
+        block_table=block_table,
+        query_start_loc=torch.tensor([0, 1], device=device, dtype=torch.int32),
+        seq_lens=torch.tensor([seq_len], device=device, dtype=torch.int32),
+        max_seq_len=seq_len,
+        max_query_len=1,
+        k_scale=torch.tensor(1.0, device=device),
+        v_scale=torch.tensor(1.0, device=device),
+        sm_scale=scale,
+    )
+
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    key_ref = (
+        keys[:, :, None, :]
+        .expand(seq_len, num_kv_heads, num_queries_per_kv, head_size)
+        .permute(1, 2, 0, 3)
+        .reshape(1, num_query_heads, seq_len, head_size)
+    )
+    value_ref = (
+        values[:, :, None, :]
+        .expand(seq_len, num_kv_heads, num_queries_per_kv, head_size)
+        .permute(1, 2, 0, 3)
+        .reshape(1, num_query_heads, seq_len, head_size)
+    )
+    ref = F.scaled_dot_product_attention(
+        query.reshape(1, num_query_heads, 1, head_size),
+        key_ref,
+        value_ref,
+        dropout_p=0.0,
+        scale=scale,
+    ).reshape_as(output)
+    torch.testing.assert_close(output, ref, atol=2e-3, rtol=1e-2)
+
+
 def create_causal_attention_mask_for_sdpa(
     query_lens: list[int],
     seq_lens: list[int],
@@ -84,9 +180,9 @@ def create_alibi_causal_mask(
 
     rel_pos = key_pos[None, :] - query_pos[:, None]
 
-    # Apply ALiBi slopes: [num_heads, query_len, seq_len]
+    # Apply ALiBi slopes in fp32 to match the Triton kernels, which add the
+    # bias to the fp32 score accumulator before softmax.
     alibi_bias = alibi_slopes[:, None, None] * rel_pos[None, :, :]
-    alibi_bias = alibi_bias.to(dtype)
 
     # Apply causal mask: prevent attending to future positions
     # causal_mask[i, j] = True if key_pos[j] <= query_pos[i]

@@ -38,7 +38,21 @@ WORKER_SPECIFIC_ENV_VARS: set[str] = {
     "CUDA_VISIBLE_DEVICES",
     "HIP_VISIBLE_DEVICES",
     "ROCR_VISIBLE_DEVICES",
+    "VLLM_NIXL_SIDE_CHANNEL_HOST",
 }
+
+
+def get_visible_devices_env_vars(visible_devices: str) -> dict[str, str]:
+    env_vars = {current_platform.device_control_env_var: visible_devices}
+    if current_platform.is_rocm():
+        # PyTorch-on-ROCm respects both CUDA_VISIBLE_DEVICES and
+        # HIP_VISIBLE_DEVICES. Keep those aliases in sync, but do not set
+        # ROCR_VISIBLE_DEVICES here: ROCr visibility is applied at a lower
+        # layer, so setting ROCR_VISIBLE_DEVICES=1 together with
+        # CUDA_VISIBLE_DEVICES=1 filters twice and can hide nonzero ranks.
+        env_vars["HIP_VISIBLE_DEVICES"] = visible_devices
+    return env_vars
+
 
 try:
     import ray

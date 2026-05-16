@@ -17,10 +17,7 @@ from vllm.config import get_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.platforms import current_platform
-from vllm.platforms.cpu import CpuPlatform
-from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.interface import DeviceCapability
-from vllm.platforms.rocm import RocmPlatform
 from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import _cached_get_attn_backend
@@ -47,18 +44,29 @@ def test_mha_attn_platform(default_vllm_config, device: str):
     torch.set_default_dtype(torch.float16)
 
     if device == "cpu":
+        from vllm.platforms.cpu import CpuPlatform
+
         with (
             patch("vllm.model_executor.models.vision.current_platform", CpuPlatform()),
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
+        from vllm.platforms.rocm import RocmPlatform
+
         with (
             patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
+            patch.object(
+                RocmPlatform,
+                "get_vit_attn_backend",
+                return_value=AttentionBackendEnum.FLASH_ATTN,
+            ),
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
     else:
+        from vllm.platforms.cuda import CudaPlatform
+
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
         with (

@@ -8,5 +8,10 @@ tasks:
   metrics:
   - name: "relaxed_accuracy,none"
     value: 0.855
+# Some CI workers can carry an older ChartQA dataset_info.json using the
+# legacy feature type "List", which current datasets releases no longer read.
+# Refresh the dataset cache before evaluating; the benchmark and thresholds are
+# unchanged.
+force_dataset_redownload: true
 limit: 2500
 num_fewshot: 0
