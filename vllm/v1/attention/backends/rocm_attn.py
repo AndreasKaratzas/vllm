@@ -27,6 +27,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
     has_native_kv_cache_layout,
@@ -246,6 +247,21 @@ class RocmAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        cache_layout = get_kv_cache_layout()
+        if cache_layout not in ("NHD", "HND"):
+            raise ValueError(f"Unknown cache layout format {cache_layout}.")
+
+        # ROCm paged attention reinterprets each per-layer page into distinct
+        # K/V native layouts via PagedAttention.split_kv_cache().  Preserve
+        # those page bytes, but move num_blocks first for cross-layer offload.
+        if include_num_layers_dimension:
+            return (2, 0, 1, 3, 4, 5)
+        return (0, 1, 2, 3, 4)
+
+    @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 
@@ -255,6 +271,14 @@ class RocmAttentionBackend(AttentionBackend):
 
 
 class RocmAttentionImpl(AttentionImpl):
+    def _split_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return PagedAttention.split_kv_cache(
+            kv_cache, self.num_kv_heads, self.head_size
+        )
+
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
@@ -408,9 +432,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
-        )
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
@@ -461,9 +483,7 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
-        )
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         # Reshape the input keys and values and store them in the cache.
         # Get the actual block_size from value_cache
@@ -516,11 +536,7 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache,
-            layer.num_kv_heads,  # type: ignore[attr-defined]
-            layer.head_size,  # type: ignore[attr-defined]
-        )
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         flash_layout = False
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

@@ -322,10 +322,15 @@ def test_tiering_offloading() -> None:
 
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
-        max_model_len=4096,
+        # ROCm's default attention is fast enough at 4k that CPU restore
+        # latency is close to cold prefill. Use a longer prompt to keep this
+        # tiering test focused on the offload path.
+        max_model_len=8192 if current_platform.is_rocm() else 4096,
         gpu_memory_utilization=0.5,
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
+        # ROCm: batch size 1 to reduce variability
+        **({"max_num_seqs": 1} if current_platform.is_rocm() else {}),
     )
     subscriber = MockSubscriber(
         events_endpoint.replace("*", "127.0.0.1"),

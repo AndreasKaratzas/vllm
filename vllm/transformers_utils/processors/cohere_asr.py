@@ -4,6 +4,10 @@ import logging
 import math
 import random
 
+try:
+    import librosa
+except ImportError:
+    librosa = None
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -129,15 +133,28 @@ class FilterbankFeatures(nn.Module):
         self.pad_min_duration = 0.0
         self.pad_direction = "both"
 
-        filterbanks = melscale_fbanks(
-            n_freqs=self.n_fft // 2 + 1,
-            f_min=lowfreq,
-            f_max=highfreq,
-            n_mels=nfilt,
-            sample_rate=sample_rate,
-            norm=mel_norm,
-            mel_scale="slaney",
-        ).T.unsqueeze(0)
+        if librosa is not None:
+            filterbanks = torch.tensor(
+                librosa.filters.mel(
+                    sr=sample_rate,
+                    n_fft=self.n_fft,
+                    n_mels=nfilt,
+                    fmin=lowfreq,
+                    fmax=highfreq,
+                    norm=mel_norm,
+                ),
+                dtype=torch.float,
+            ).unsqueeze(0)
+        else:
+            filterbanks = melscale_fbanks(
+                n_freqs=self.n_fft // 2 + 1,
+                f_min=lowfreq,
+                f_max=highfreq,
+                n_mels=nfilt,
+                sample_rate=sample_rate,
+                norm=mel_norm,
+                mel_scale="slaney",
+            ).T.unsqueeze(0)
         self.register_buffer("fb", filterbanks)
 
         # Calculate maximum sequence length
@@ -180,6 +197,30 @@ class FilterbankFeatures(nn.Module):
 
         self.generator = torch.Generator(device=device)
         self.generator.manual_seed(0)
+
+    @torch._dynamo.disable
+    def _apply_dither(self, x, seq_len_time):
+        """Apply deterministic per-sample dither.
+
+        The Cohere ASR reference processor seeds each sample from its valid
+        waveform length so the feature values do not depend on batch
+        composition.
+        """
+        if self.dither <= 0:
+            return x
+        for i in range(x.shape[0]):
+            valid_samples = min(int(seq_len_time[i].item()), x.shape[1])
+            if valid_samples <= 0:
+                continue
+            self.generator.manual_seed(valid_samples)
+            noise = torch.randn(
+                (valid_samples,),
+                dtype=x.dtype,
+                device=x.device,
+                generator=self.generator,
+            )
+            x[i, :valid_samples] += self.dither * noise
+        return x
 
     @torch._dynamo.disable
     def stft(self, x):
@@ -340,11 +381,7 @@ class FilterbankFeatures(nn.Module):
                 x.unsqueeze(1), (self.stft_pad_amount, self.stft_pad_amount), "constant"
             ).squeeze(1)
 
-        # use dither for inference as well
-        if self.dither > 0:
-            x += self.dither * torch.randn(
-                x.shape, dtype=x.dtype, device=x.device, generator=self.generator
-            )
+        x = self._apply_dither(x, seq_len_time)
 
         # do preemphasis
         if self.preemph is not None:

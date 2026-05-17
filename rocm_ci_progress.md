@@ -13358,3 +13358,307 @@ pytest -q -s \
   --tb=short
 4 passed
 ```
+
+## 2026-05-17 - Buildkite 8552 / 8555 Patch Inventory
+
+Source runs:
+
+- PR / actual AMD run: https://buildkite.com/vllm/amd-ci/builds/8552/list
+- Upstream AMD full CI run: https://buildkite.com/vllm/amd-ci/builds/8555/list
+
+This section records the current 12-file diff and the intent behind each file.
+The common rule for this pass was to avoid masking failures by weakening tests
+or forcing a different backend, and instead fix the path that the ROCm stack
+actually exercises.
+
+### Current changed files
+
+#### `.buildkite/test-amd.yaml`
+
+Test group addressed:
+
+- `mi355_1: Multi-Modal Models (Extended Generation 1)`
+
+Thought process:
+
+- Buildkite logs showed the shard was not balanced: two shards completed in
+  about 13 minutes while two ran for hours and timed out.
+- The slow rows were concentrated around Pixtral / large Mistral-family
+  multimodal generation. Keeping them inside the normal four-way shard meant
+  shard duration depended more on model-load shape than on test count.
+- The patch removes `test_pixtral.py` from the main Extended Generation 1 shard
+  and adds a separate optional Pixtral step. This should make the main shard
+  less tail-heavy while preserving visibility into Pixtral failures.
+
+Validation:
+
+- YAML parsing succeeded locally.
+- Full shard-duration validation still needs Buildkite, because the change is
+  about CI scheduling behavior rather than a local pytest assertion.
+
+#### `vllm/model_executor/model_loader/weight_utils.py`
+
+Test group addressed:
+
+- `mi355_1: Multi-Modal Models (Extended Generation 1)`
+- Specifically the long model-load tails on WEKAFS-backed checkpoints.
+
+Thought process:
+
+- Local logs showed checkpoint load was happening from a filesystem reported as
+  WEKAFS. The existing auto-prefetch logic only recognized NFS/NFS4/Lustre as
+  network filesystems.
+- Treating WEKAFS as network storage lets large safetensors checkpoints use the
+  same prefetch path as other network filesystems, reducing slow first-touch
+  behavior during large multimodal model startup.
+
+#### `tests/model_executor/model_loader/test_ep_weight_filter.py`
+
+Test group addressed:
+
+- Unit coverage for the WEKAFS prefetch path above.
+
+Thought process:
+
+- The filesystem classification is small but easy to regress silently. The new
+  tests verify both the predicate (`nfs`, `nfs4`, `lustre`, `wekafs`) and that a
+  WEKAFS safetensors load actually enters the prefetch path.
+
+Validation:
+
+```text
+pytest -q tests/model_executor/model_loader/test_ep_weight_filter.py \
+  -k safetensors_auto_prefetch
+```
+
+Result: passed locally.
+
+#### `vllm/transformers_utils/config.py`
+
+Test group addressed:
+
+- `kernels/moe/test_ocp_mx_moe.py::test_mxfp4_loading_and_execution_moe[model_case2]`
+- Model: `fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4`
+
+Thought process:
+
+- The Llama 4 checkpoint has a legacy `text_config.attn_temperature_tuning`
+  value encoded as an integer. Newer Transformers validates that field as a
+  boolean.
+- `AutoConfig.from_pretrained()` re-reads the raw config from disk / hub, so
+  simply mutating the first dictionary is not enough. For legacy Llama 4 configs
+  only, the code now normalizes the dict and constructs the config object from
+  that normalized dict.
+- The scope is deliberately narrow: only Llama 4 with the legacy integer field
+  takes the from-dict path.
+
+#### `tests/transformers_utils/test_config.py`
+
+Test group addressed:
+
+- Unit coverage for the Llama 4 config normalization above.
+
+Thought process:
+
+- The failure was caused by strict config validation before model execution.
+  A small unit test catches the exact legacy field shape (`4` -> `True`) without
+  needing to instantiate the large Llama 4 model.
+
+Validation:
+
+```text
+pytest -q tests/transformers_utils/test_config.py \
+  -k llama4_attn_temperature_tuning
+```
+
+Result: passed locally.
+
+#### `vllm/tokenizers/registry.py`
+
+Test group addressed:
+
+- Same Llama 4 OCP MX MoE row:
+  `kernels/moe/test_ocp_mx_moe.py::test_mxfp4_loading_and_execution_moe[model_case2]`
+
+Thought process:
+
+- The model config path was normalized, but tokenizer loading can call
+  `AutoConfig.from_pretrained()` internally and re-read the raw, unnormalized
+  Llama 4 config.
+- Passing the already-normalized config into `from_pretrained()` for Llama 4
+  keeps the tokenizer path consistent with the model config path. This is not
+  ROCm-specific in principle; ROCm CI just happens to exercise this Llama 4
+  MXFP4 checkpoint.
+
+#### `vllm/transformers_utils/processor.py`
+
+Test group addressed:
+
+- Same Llama 4 config-normalization family, with multimodal processor loading
+  as the equivalent internal config re-read risk.
+
+Thought process:
+
+- Llama 4 multimodal processors can also instantiate through a path that wants
+  model config. The processor cache helper now accepts an optional config and
+  uses the uncached `get_processor` path when passing that object through.
+- This keeps the fix limited to Llama 4 while avoiding cache keys that contain
+  mutable config objects.
+
+#### `vllm/model_executor/layers/quantization/moe_wna16.py`
+
+Test group addressed:
+
+- `models/quantization/test_awq.py::test_awq_load[gemma4-moe-standard-awq-dot-suffix]`
+
+Thought process:
+
+- The old assertion required every WNA16 MoE layer to use SiLU. Gemma 4 MoE AWQ
+  reaches the same quantized MoE path with a different declared activation.
+- The right fix is not to pretend the model uses SiLU, but to pass
+  `layer.activation` through to `fused_experts`, which already has the activation
+  selection surface.
+
+Validation:
+
+```text
+pytest -q -s \
+  'tests/models/quantization/test_awq.py::test_awq_load[gemma4-moe-standard-awq-dot-suffix]' \
+  --tb=short
+```
+
+Result: passed locally.
+
+#### `vllm/v1/attention/backends/rocm_attn.py`
+
+Test group addressed:
+
+- `tests/v1/kv_connector/unit/test_offloading_connector.py::test_tiering_offloading`
+
+Thought process:
+
+- `ROCM_ATTN` is applicable for this Llama decoder workload. The earlier
+  TRITON override made the test pass, but it hid the real issue.
+- `OffloadingConnector` prefers a cross-layer KV layout for efficient transfer.
+  `ROCM_ATTN` did not advertise a compatible block-first layout, so the worker
+  registered many per-layer tensors and CPU restore was too slow/noisy.
+- The ROCm paged-attention cache has a native per-page K/V interpretation, so
+  the fix preserves those page bytes and only moves `num_blocks` first when a
+  cross-layer layout is requested.
+
+#### `tests/v1/kv_connector/unit/test_offloading_connector.py`
+
+Test group addressed:
+
+- `tests/v1/kv_connector/unit/test_offloading_connector.py::test_tiering_offloading`
+
+Thought process:
+
+- After the real ROCm attention layout fix, the 4k prompt was still too small:
+  CPU restore averaged faster than cold prefill, but individual timing wins
+  were unstable.
+- The test is intended to prove tiered offload latency and correctness, so the
+  ROCm tiering row now uses an 8k context to make the offload benefit visible
+  while keeping the default ROCm attention backend.
+- `max_num_seqs=1` remains ROCm-only to reduce timing variance.
+
+Validation:
+
+```text
+pytest -q -s \
+  tests/v1/kv_connector/unit/test_offloading_connector.py::test_tiering_offloading \
+  --tb=short
+```
+
+Result: passed locally on MI355 with default `ROCM_ATTN`.
+
+Observed final run:
+
+```text
+Average times:
+    Cold: 47.84ms
+    GPU hit: 20.79ms
+    CPU hit: 32.26ms
+1 passed
+```
+
+#### `vllm/transformers_utils/processors/cohere_asr.py`
+
+Test group addressed:
+
+- `entrypoints/speech_to_text/correctness/test_transcription_api_correctness.py::test_wer_correctness[D4nt3/esb-datasets-earnings22-validation-tiny-filtered-cohere-rocm-triton-attn]`
+
+Thought process:
+
+- The goal was not to raise `expected_wer`. The ROCm row should use the same
+  frontend feature computation as the reference path where possible.
+- Cohere's reference processor uses librosa-style Mel filters. vLLM was using
+  torchaudio's Mel filter construction, which is close but not identical.
+- Dither was also batch-global; making it deterministic per sample length avoids
+  feature changes caused by unrelated batch composition.
+- The patch uses librosa when available and keeps a torchaudio fallback, then
+  applies dither only over the valid waveform length.
+
+Validation:
+
+```text
+pytest -q tests/transformers_utils/test_cohere_asr_processor.py
+```
+
+Result: passed locally.
+
+The exact STT correctness row also passed locally with the original
+`expected_wer: 11.78`; the observed WER was about `11.975`, still within the
+test tolerance.
+
+#### `tests/transformers_utils/test_cohere_asr_processor.py`
+
+Test group addressed:
+
+- Unit coverage for the Cohere ASR frontend changes above.
+
+Thought process:
+
+- The tests lock in the two intended behavioral properties: per-sample dither
+  is batch invariant and does not touch padded samples, and the filterbank
+  matches librosa when librosa is installed.
+
+Validation:
+
+```text
+pytest -q tests/transformers_utils/test_cohere_asr_processor.py
+```
+
+Result: passed locally.
+
+### Cross-checks from this patch set
+
+Exact failing rows checked locally:
+
+```text
+pytest -q -s \
+  tests/kernels/moe/test_ocp_mx_moe.py::test_mxfp4_loading_and_execution_moe[model_case2] \
+  --tb=short
+passed
+
+pytest -q -s \
+  'tests/models/quantization/test_awq.py::test_awq_load[gemma4-moe-standard-awq-dot-suffix]' \
+  --tb=short
+passed
+
+pytest -q -s \
+  tests/v1/kv_connector/unit/test_offloading_connector.py::test_tiering_offloading \
+  --tb=short
+passed
+
+pytest -q tests/transformers_utils/test_cohere_asr_processor.py
+passed
+```
+
+Rows that reproduced as already passing without code changes:
+
+- `models/language/generation/test_common.py::test_models[True-True-5-32-TitanML/tiny-mixtral]`
+- `models/language/generation/test_common.py::test_models[False-True-5-32-TitanML/tiny-mixtral]`
+
+No C/CUDA source was changed in this patch set, so `../vllm-scripts/rebuild.sh`
+was not required.

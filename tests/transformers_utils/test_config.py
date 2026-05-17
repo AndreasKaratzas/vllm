@@ -7,7 +7,10 @@ only get the `eos_token_id` from the tokenizer as defined by
 """
 
 from vllm.tokenizers import get_tokenizer
-from vllm.transformers_utils.config import try_get_generation_config
+from vllm.transformers_utils.config import (
+    _maybe_normalize_hf_config_dict,
+    try_get_generation_config,
+)
 
 
 def test_get_llama3_eos_token():
@@ -30,3 +33,16 @@ def test_get_blip2_eos_token():
     generation_config = try_get_generation_config(model_name, trust_remote_code=False)
     assert generation_config is not None
     assert generation_config.eos_token_id == 50118
+
+
+def test_llama4_attn_temperature_tuning_legacy_int_normalization():
+    config_dict = {
+        "model_type": "llama4",
+        "text_config": {
+            "attn_temperature_tuning": 4,
+        },
+    }
+
+    normalized = _maybe_normalize_hf_config_dict(config_dict, "llama4")
+
+    assert normalized["text_config"]["attn_temperature_tuning"] is True

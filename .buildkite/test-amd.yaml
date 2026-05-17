@@ -3156,8 +3156,24 @@ steps:
   - tests/models/multimodal/test_mapping.py
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_pixtral.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - pytest -v -s models/multimodal/test_mapping.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+- label: Multi-Modal Models (Extended Generation 1 Pixtral) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation/test_pixtral.py
+  - tests/models/fixtures/pixtral_chat.json
+  - tests/models/fixtures/mistral_small_3_chat.json
+  - tests/models/fixtures/ministral_3b_chat.json
+  commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_pixtral.py -m 'not core_model'
 
 - label: Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180

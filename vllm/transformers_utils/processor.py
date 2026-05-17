@@ -306,14 +306,19 @@ def cached_get_processor_without_dynamic_kwargs(
     revision: str | None = None,
     trust_remote_code: bool = False,
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
+    config: Any | None = None,
     **kwargs: Any,
 ) -> _P:
+    get_processor_fn = get_processor if config is not None else cached_get_processor
+    config_kwargs = {"config": config} if config is not None else {}
+
     # Step 1: use default kwargs to get a temporary processor instance
-    processor = cached_get_processor(
+    processor = get_processor_fn(
         processor_name,
         revision=revision,
         trust_remote_code=trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
+        **config_kwargs,
     )
 
     # Step 2: use temporary processor collect dynamic keys
@@ -325,11 +330,12 @@ def cached_get_processor_without_dynamic_kwargs(
     filtered_kwargs = {k: v for k, v in kwargs.items() if k not in dynamic_keys}
 
     # Step 4: use filtered kwargs to get final processor instance
-    final_processor = cached_get_processor(
+    final_processor = get_processor_fn(
         processor_name,
         revision=revision,
         trust_remote_code=trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
+        **config_kwargs,
         **filtered_kwargs,
     )
 
@@ -352,11 +358,18 @@ def cached_processor_from_config(
         model = model_config.model
         revision = model_config.revision
 
+    config = (
+        model_config.hf_config
+        if getattr(model_config.hf_config, "model_type", None) == "llama4"
+        else None
+    )
+
     return cached_get_processor_without_dynamic_kwargs(
         model,
         revision=revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
+        config=config,
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
 

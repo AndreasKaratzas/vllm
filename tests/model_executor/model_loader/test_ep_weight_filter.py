@@ -8,15 +8,50 @@ import tempfile
 import huggingface_hub.constants
 import pytest
 import torch
+from safetensors.torch import save_file
 
+from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
     parse_expert_id,
     should_skip_weight,
 )
 from vllm.model_executor.model_loader.weight_utils import (
+    _should_auto_prefetch_on_fs,
     safetensors_weights_iterator,
 )
+
+# ---------------------------------------------------------------------------
+# Unit tests for safetensors prefetch filesystem detection
+# ---------------------------------------------------------------------------
+
+
+def test_safetensors_auto_prefetch_fs_types():
+    for fs_type in ("nfs", "nfs4", "lustre", "wekafs", "WEKAFS"):
+        assert _should_auto_prefetch_on_fs(fs_type)
+
+    assert not _should_auto_prefetch_on_fs("overlay")
+
+
+def test_safetensors_auto_prefetch_on_wekafs(monkeypatch, tmp_path):
+    safetensors_path = tmp_path / "model.safetensors"
+    save_file({"weight": torch.ones(1)}, str(safetensors_path))
+    prefetched_files = []
+
+    monkeypatch.setattr(weight_utils, "_get_fs_type", lambda _: "wekafs")
+    monkeypatch.setattr(weight_utils, "_get_checkpoints_size_bytes", lambda _: 1)
+    monkeypatch.setattr(weight_utils, "_get_available_ram_bytes", lambda: 1024)
+    monkeypatch.setattr(
+        weight_utils,
+        "_prefetch_all_checkpoints",
+        lambda files, **_: prefetched_files.append(files),
+    )
+
+    loaded = dict(safetensors_weights_iterator([str(safetensors_path)], False))
+
+    assert prefetched_files == [[str(safetensors_path)]]
+    torch.testing.assert_close(loaded["weight"], torch.ones(1))
+
 
 # ---------------------------------------------------------------------------
 # Unit tests for parse_expert_id

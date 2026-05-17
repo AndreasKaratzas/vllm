@@ -204,6 +204,10 @@ class HFConfigParser(ConfigParserBase):
         )
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
+        load_config_from_dict = _should_load_config_from_dict(
+            model_type, config_dict
+        )
+        config_dict = _maybe_normalize_hf_config_dict(config_dict, model_type)
         if model_type is None:
             model_type = (
                 "speculators"
@@ -254,13 +258,18 @@ class HFConfigParser(ConfigParserBase):
                 trust_remote_code = False
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
-                config = AutoConfig.from_pretrained(
-                    model,
-                    trust_remote_code=trust_remote_code,
-                    revision=revision,
-                    code_revision=code_revision,
-                    **kwargs,
-                )
+                if load_config_from_dict:
+                    config = _auto_config_from_config_dict(
+                        model_type, config_dict, name_or_path=str(model), **kwargs
+                    )
+                else:
+                    config = AutoConfig.from_pretrained(
+                        model,
+                        trust_remote_code=trust_remote_code,
+                        revision=revision,
+                        code_revision=code_revision,
+                        **kwargs,
+                    )
             except ValueError as e:
                 if (
                     not trust_remote_code
@@ -588,6 +597,51 @@ def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
         kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
     return kwargs
+
+
+def _maybe_normalize_hf_config_dict(
+    config_dict: dict[str, Any],
+    model_type: str | None,
+) -> dict[str, Any]:
+    """Normalize legacy HF config fields before strict dataclass validation."""
+    if model_type == "llama4":
+        text_config = config_dict.get("text_config")
+        if isinstance(text_config, dict):
+            attn_temperature_tuning = text_config.get("attn_temperature_tuning")
+            if isinstance(attn_temperature_tuning, int) and not isinstance(
+                attn_temperature_tuning, bool
+            ):
+                text_config["attn_temperature_tuning"] = bool(attn_temperature_tuning)
+
+    return config_dict
+
+
+def _should_load_config_from_dict(
+    model_type: str | None,
+    config_dict: dict[str, Any],
+) -> bool:
+    # AutoConfig.from_pretrained re-reads the raw on-disk config, so use the
+    # already-normalized dict for legacy Llama 4 checkpoints.
+    if model_type != "llama4":
+        return False
+    text_config = config_dict.get("text_config")
+    if not isinstance(text_config, dict):
+        return False
+    attn_temperature_tuning = text_config.get("attn_temperature_tuning")
+    return isinstance(attn_temperature_tuning, int) and not isinstance(
+        attn_temperature_tuning, bool
+    )
+
+
+def _auto_config_from_config_dict(
+    model_type: str,
+    config_dict: dict[str, Any],
+    **kwargs: Any,
+) -> PretrainedConfig:
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    config_class = CONFIG_MAPPING[model_type]
+    return config_class.from_dict(config_dict, **kwargs)
 
 
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:

@@ -70,6 +70,8 @@ from vllm.model_executor.layers.quantization.torchao import torchao_version_at_l
 
 logger = init_logger(__name__)
 
+_SAFETENSORS_AUTO_PREFETCH_FS_TYPES = frozenset({"nfs", "nfs4", "lustre", "wekafs"})
+
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
 # lock files in the temp directory will be automatically deleted when the
@@ -798,6 +800,10 @@ def _get_fs_type(files: list[str]) -> str:
         return ""
 
 
+def _should_auto_prefetch_on_fs(fs_type: str) -> bool:
+    return fs_type.lower() in _SAFETENSORS_AUTO_PREFETCH_FS_TYPES
+
+
 def _prefetch_checkpoint(
     file_path: str,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
@@ -912,7 +918,7 @@ def safetensors_weights_iterator(
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
 
     fs_type = _get_fs_type(sorted_files)
-    is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
+    is_net_fs = _should_auto_prefetch_on_fs(fs_type)
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
     avail_bytes = _get_available_ram_bytes()
     ram_threshold_pct = 90
@@ -944,14 +950,14 @@ def safetensors_weights_iterator(
         elif not is_net_fs and fits_in_ram:
             logger.info_once(
                 "Auto-prefetch is disabled because the filesystem (%s) is not a "
-                "recognized network FS (NFS/Lustre). If you want to force "
+                "recognized network FS (NFS/Lustre/WEKAFS). If you want to force "
                 "prefetching, start vLLM with --safetensors-load-strategy=prefetch.",
                 fs_name,
             )
         elif not is_net_fs and not fits_in_ram:
             logger.info_once(
                 "Auto-prefetch is disabled because the filesystem (%s) is not a "
-                "recognized network FS (NFS/Lustre) and the checkpoint size "
+                "recognized network FS (NFS/Lustre/WEKAFS) and the checkpoint size "
                 "(%.2f GiB) exceeds %d%% of available RAM (%.2f GiB).",
                 fs_name,
                 total_bytes / 1024**3,
