@@ -154,7 +154,10 @@ class ExllamaLinearKernel(MPLinearKernel):
     ) -> torch.Tensor:
         c = self.config
 
+        orig_dtype = x.dtype
         x_2d = x.reshape(-1, x.shape[-1])
+        if orig_dtype != c.act_type:
+            x_2d = x_2d.to(c.act_type)
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
 
         w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
@@ -169,6 +172,8 @@ class ExllamaLinearKernel(MPLinearKernel):
         output = ops.gptq_gemm(
             x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format, c.weight_type.size_bits
         )
+        if output.dtype != orig_dtype:
+            output = output.to(orig_dtype)
 
         if bias is not None:
             output.add_(bias)

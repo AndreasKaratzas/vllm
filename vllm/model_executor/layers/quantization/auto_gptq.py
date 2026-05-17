@@ -229,8 +229,9 @@ class AutoGPTQConfig(QuantizationConfig):
             "gptq",
             "gptq_marlin",
             "auto_gptq",
-            "marlin",
         )
+        if user_quant == "marlin" and current_platform.is_cuda():
+            is_valid_user_quant = True
 
         if is_valid_user_quant:
             return cls.get_name()
@@ -365,6 +366,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         is_row_parallel = input_size != input_size_per_partition
         weight_loader = extra_weight_attrs.get("weight_loader")
         input_dtype = self.input_dtype
+        if (
+            current_platform.is_rocm()
+            and self.quant_config.desc_act
+            and input_dtype is None
+            and params_dtype == torch.bfloat16
+        ):
+            logger.warning_once(
+                "Casting bfloat16 activations to float16 for ROCm "
+                "activation-order GPTQ because the fallback Exllama kernel "
+                "requires float16 activations."
+            )
+            input_dtype = torch.float16
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),

@@ -163,8 +163,9 @@ class QuantFP8(CustomOp):
             assert scale is None, "Dynamic group quantization does not use scale"
             return self._quantize_group_native(x)
 
-        # Fallback to CUDA implementation
-        return self.forward_cuda(x, scale, scale_ub)
+        # Fallback to the base CUDA implementation. Calling self.forward_cuda()
+        # is unsafe for QuantFP8 subclasses that wrap the quantization call.
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub)
 
     def forward_xpu(
         self,

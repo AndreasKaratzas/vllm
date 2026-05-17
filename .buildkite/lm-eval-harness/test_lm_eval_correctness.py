@@ -10,6 +10,7 @@ pytest -s -v test_lm_eval_correctness.py \
 """
 
 import os
+from copy import deepcopy
 from contextlib import contextmanager
 
 import lm_eval
@@ -58,6 +59,7 @@ def scoped_env_vars(new_env: dict[str, str]):
 
 def _lm_eval_task_specs(eval_config):
     force_redownload = eval_config.get("force_dataset_redownload", False)
+    task_manager = None
     task_specs = []
     for task in eval_config["tasks"]:
         task_name = task["name"]
@@ -67,12 +69,29 @@ def _lm_eval_task_specs(eval_config):
             dataset_kwargs["download_mode"] = DownloadMode.FORCE_REDOWNLOAD
 
         if dataset_kwargs:
-            task_specs.append(
-                {
-                    "task": task_name,
-                    "dataset_kwargs": dataset_kwargs,
-                }
-            )
+            if task_manager is None:
+                from lm_eval.tasks import TaskManager
+
+                task_manager = TaskManager()
+
+            entry = task_manager.task_index.get(task_name)
+            if entry is None:
+                pytest.fail(
+                    f"Unable to apply dataset_kwargs to unknown lm-eval task "
+                    f"{task_name!r}"
+                )
+
+            if entry.cfg is None:
+                from lm_eval.tasks._factory import load_yaml
+
+                task_spec = load_yaml(entry.yaml_path, resolve_func=True)
+            else:
+                task_spec = deepcopy(entry.cfg)
+            task_spec["dataset_kwargs"] = {
+                **task_spec.get("dataset_kwargs", {}),
+                **dataset_kwargs,
+            }
+            task_specs.append(task_spec)
         else:
             task_specs.append(task_name)
 

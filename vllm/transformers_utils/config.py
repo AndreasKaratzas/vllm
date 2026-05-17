@@ -135,6 +135,21 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     tarsier2="Tarsier2Config",
 )
 
+
+def _rebuild_lazy_config_mapping(mapping: Any, extra_content: dict[str, Any]) -> Any:
+    from transformers.models.auto.configuration_auto import _LazyConfigMapping
+
+    lazy_mapping = _LazyConfigMapping(mapping)
+    lazy_mapping._extra_content.update(extra_content)
+    return lazy_mapping
+
+
+def _reduce_lazy_config_mapping(lazy_mapping: Any):
+    return (
+        _rebuild_lazy_config_mapping,
+        (lazy_mapping._mapping, lazy_mapping._extra_content),
+    )
+
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
@@ -1030,6 +1045,7 @@ def maybe_register_config_serialize_by_value() -> None:
         transformers_modules_available = False
 
     try:
+        import copyreg
         import multiprocessing
         import pickle
 
@@ -1044,6 +1060,19 @@ def maybe_register_config_serialize_by_value() -> None:
             return (pickle.loads, (cloudpickle.dumps(config),))
 
         multiprocessing.reducer.register(VllmConfig, _reduce_config)
+
+        try:
+            from transformers.models.auto.configuration_auto import _LazyConfigMapping
+
+            # Some trust_remote_code config modules keep a module-level
+            # CONFIG_MAPPING. When cloudpickle serializes that module by value,
+            # pickle needs an explicit constructor for Transformers' lazy map.
+            copyreg.pickle(_LazyConfigMapping, _reduce_lazy_config_mapping)
+            multiprocessing.reducer.register(
+                _LazyConfigMapping, _reduce_lazy_config_mapping
+            )
+        except Exception:
+            pass
 
         # Register transformers_modules with cloudpickle if available
         if transformers_modules_available:

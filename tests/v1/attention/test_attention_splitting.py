@@ -9,6 +9,7 @@ from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -191,6 +192,18 @@ def test_split_decodes_and_prefills_nonuniform_all_ones():
     assert num_prefills == 0
     assert num_decode_tokens == 3
     assert num_prefill_tokens == 0
+
+
+def test_split_decodes_prefills_and_extends_all_decode_no_seq_len_upper_bound():
+    common_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[10, 12, 14], query_lens=[1, 1, 1]),
+        block_size=16,
+        device=torch.device("cpu"),
+    ).replace(seq_lens_cpu_upper_bound=None)
+
+    assert split_decodes_prefills_and_extends(
+        common_metadata, decode_threshold=1
+    ) == (3, 0, 0, 3, 0, 0)
 
 
 def test_split_decodes_and_prefills_nonuniform_all_short_decodes():
