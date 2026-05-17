@@ -963,12 +963,22 @@ class RocmPlatform(Platform):
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.config.kernel import IrOpPriorityConfig
 
-        # Native used by default when compiling,
-        # use vllm_c kernels where available when no codegen
+        # Native used by default when compiling. For eager classification
+        # pooling, prefer native as well: low-probability reranker scores can
+        # amplify small RMSNorm drift from the ROCm custom kernel.
         # TODO(luka/TJ) use aiter, vllm_c, native by default on ROCm
         cc = vllm_config.compilation_config
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
-        default = ["native"] if using_inductor else ["vllm_c", "native"]
+        model_config = vllm_config.model_config
+        eager_classification_pooling = (
+            getattr(model_config, "runner_type", None) == "pooling"
+            and getattr(model_config, "convert_type", None) == "classify"
+        )
+        default = (
+            ["native"]
+            if using_inductor or eager_classification_pooling
+            else ["vllm_c", "native"]
+        )
 
         # AITER RMSNorm is only enabled by default on the MI300-family archs
         # where the AITER package is considered supported. This keeps the IR

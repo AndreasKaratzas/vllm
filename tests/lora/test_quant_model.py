@@ -71,61 +71,63 @@ def do_sample(
 
 @pytest.mark.parametrize("model", MODELS)
 def test_quant_model_lora(tinyllama_lora_files, model):
-    llm = vllm.LLM(
-        model=model.model_path,
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=4,
-        max_model_len=400,
-        gpu_memory_utilization=0.2,  # avoid OOM
-        quantization=model.quantization,
-        trust_remote_code=True,
-        enable_chunked_prefill=True,
-        tokenizer=tinyllama_lora_files,
-    )
+    llm = None
+    try:
+        llm = vllm.LLM(
+            model=model.model_path,
+            enable_lora=True,
+            max_num_seqs=16,
+            max_loras=4,
+            max_model_len=400,
+            gpu_memory_utilization=0.2,  # avoid OOM
+            quantization=model.quantization,
+            trust_remote_code=True,
+            enable_chunked_prefill=True,
+            tokenizer=tinyllama_lora_files,
+        )
 
-    if model.quantization is None:
-        expected_lora_output = [
-            "#ff8050",
-            "#ff8080",
-        ]
-    elif model.quantization == "awq":
-        expected_lora_output = [
-            "#f07700: A v",
-            "#f00000: A v",
-        ]
-    elif model.quantization == "gptq":
-        expected_lora_output = [
-            "#f08800: This is",
-            "#f07788 \n#",
-        ]
+        if model.quantization is None:
+            expected_lora_output = [
+                "#ff8050",
+                "#ff8080",
+            ]
+        elif model.quantization == "awq":
+            expected_lora_output = [
+                "#f07700: A v",
+                "#f00000: A v",
+            ]
+        elif model.quantization == "gptq":
+            expected_lora_output = [
+                "#f08800: This is",
+                "#f07788 \n#",
+            ]
 
-    def expect_match(output, expected_output):
-        # HACK: GPTQ lora outputs are just incredibly unstable.
-        # Assert that the outputs changed.
-        if model.quantization == "gptq" and expected_output is expected_lora_output:
-            for i, o in enumerate(output):
-                assert o.startswith("#"), (
-                    f"Expected example {i} to start with # but got {o}"
-                )
-            return
-        assert output == expected_output
+        def expect_match(output, expected_output):
+            # HACK: GPTQ lora outputs are just incredibly unstable.
+            # Assert that the outputs changed.
+            if model.quantization == "gptq" and expected_output is expected_lora_output:
+                for i, o in enumerate(output):
+                    assert o.startswith("#"), (
+                        f"Expected example {i} to start with # but got {o}"
+                    )
+                return
+            assert output == expected_output
 
-    max_tokens = 10
+        max_tokens = 10
 
-    print("lora adapter created")
-    print("lora 1")
-    output = do_sample(llm, tinyllama_lora_files, lora_id=1, max_tokens=max_tokens)
-    expect_match(output, expected_lora_output)
+        print("lora adapter created")
+        print("lora 1")
+        output = do_sample(llm, tinyllama_lora_files, lora_id=1, max_tokens=max_tokens)
+        expect_match(output, expected_lora_output)
 
-    print("lora 2")
-    output = do_sample(llm, tinyllama_lora_files, lora_id=2, max_tokens=max_tokens)
-    expect_match(output, expected_lora_output)
-
-    print("removing lora")
-
-    del llm
-    cleanup_dist_env_and_memory()
+        print("lora 2")
+        output = do_sample(llm, tinyllama_lora_files, lora_id=2, max_tokens=max_tokens)
+        expect_match(output, expected_lora_output)
+    finally:
+        print("removing lora")
+        if llm is not None:
+            del llm
+        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize("model", MODELS)

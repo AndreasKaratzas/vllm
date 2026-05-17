@@ -126,6 +126,9 @@ def enable_rocm_aiter_for_test():
 )
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
+    if ROCM_AVAILABLE and not ROCM_GFX950:
+        pytest.skip("MXFP4 is supported on ROCm only on gfx950")
+
     if torch.accelerator.device_count() < model_case.tp:
         pytest.skip(
             f"This test requires >={model_case.tp} gpus, got only "

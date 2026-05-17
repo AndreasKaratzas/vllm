@@ -197,7 +197,10 @@ def run_evaluation(
             {
                 "name": COHERE_ASR_MODEL,
                 "attention_backend": "TRITON_ATTN",
-                "expected_wer": 11.78,
+                # Cohere has published model updates under the same default
+                # revision, and CI caches can temporarily contain either
+                # checkpoint while the cache rolls forward.
+                "expected_wer": [11.78, 12.00],
             },
             marks=pytest.mark.skipif(
                 not current_platform.is_rocm(),
@@ -261,7 +264,26 @@ def test_wer_correctness(
             n_examples,
         )
 
-        print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
+        expected_wers = (
+            expected_wer if isinstance(expected_wer, list) else [expected_wer]
+        )
+        print(f"Expected WER: {expected_wers}, Actual WER: {wer}")
 
         if expected_wer:
-            torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
+            errors = []
+            for expected in expected_wers:
+                try:
+                    torch.testing.assert_close(
+                        wer,
+                        expected,
+                        atol=1e-1,
+                        rtol=1e-2,
+                    )
+                    break
+                except AssertionError as e:
+                    errors.append(str(e))
+            else:
+                raise AssertionError(
+                    f"Actual WER {wer} did not match any expected baseline "
+                    f"{expected_wers}. Last failure: {errors[-1]}"
+                )

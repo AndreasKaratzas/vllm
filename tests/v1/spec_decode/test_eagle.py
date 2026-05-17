@@ -1009,9 +1009,11 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     num_speculative_tokens = 3
     vocab_size = 8
 
+    attn_backend = get_attn_backend_list_based_on_platform()[0]
     proposer = _create_proposer(
         "draft_model",
         num_speculative_tokens,
+        attention_backend=attn_backend,
         rejection_sample_method="standard",
         draft_sample_method="probabilistic",
     )
@@ -1051,7 +1053,7 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     )
 
     attn_metadata_builder_cls, _ = try_get_attention_backend(
-        AttentionBackendEnum.FLASH_ATTN
+        AttentionBackendEnum[attn_backend]
     )
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),

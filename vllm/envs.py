@@ -1989,4 +1989,26 @@ def compile_factors() -> dict[str, object]:
     for var in ray_noset_env_vars:
         factors[var] = normalize_value(os.getenv(var))
 
+    try:
+        from vllm.platforms import current_platform
+
+        is_rocm = current_platform.is_rocm()
+    except Exception:
+        is_rocm = False
+
+    if is_rocm:
+        # ROCm torch.compile/AOT artifacts may contain concrete device
+        # ordinals from the process-visible device namespace. Keep cache
+        # entries from Ray's per-actor visibility and mp's broad visibility
+        # from being reused across incompatible layouts.
+        factors["ROCM_CUDA_VISIBLE_DEVICES"] = normalize_value(
+            os.getenv("CUDA_VISIBLE_DEVICES")
+        )
+        factors["ROCM_HIP_VISIBLE_DEVICES"] = normalize_value(
+            os.getenv("HIP_VISIBLE_DEVICES")
+        )
+        factors["ROCM_ROCR_VISIBLE_DEVICES"] = normalize_value(
+            os.getenv("ROCR_VISIBLE_DEVICES")
+        )
+
     return factors
