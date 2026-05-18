@@ -7,8 +7,11 @@ num_fewshot: 5
 server_args: >-
   --max-model-len 4096
   --tensor-parallel-size 2
+  --gpu-memory-utilization 0.35
+  --moe-backend aiter
 env:
   # This model cold-builds a large AITER MXFP4 MoE extension on gfx950.
   # AITER otherwise lets ninja use most host CPUs, which can wedge hipcc long
   # enough for TP ranks to wait forever on the JIT baton in CI.
   MAX_JOBS: "4"
+  VLLM_ROCM_USE_AITER: "1"
