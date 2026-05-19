@@ -40,10 +40,12 @@ BACKEND_TOL: dict[str, float] = {
 
 # ROCm 7.2/gfx950 shows small absolute drift on the low text-vs-text
 # probability even though larger scores remain well inside the relative
-# tolerance. Keep the relative tolerances tight and add only a small floor.
+# tolerance. Keep the relative tolerances tight and add only a small floor for
+# backends that hit this low-score case.
 BACKEND_ABS_TOL: dict[str, float] = {
     "default": 0.0,
-    "ROCM_AITER_FA": 0.005,
+    "ROCM_AITER_FA": 0.006,
+    "TRITON_ATTN": 0.006,
     "FLEX_ATTENTION": 0.006,
 }
 

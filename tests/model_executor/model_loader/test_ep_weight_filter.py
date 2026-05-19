@@ -34,10 +34,38 @@ def test_safetensors_auto_prefetch_fs_types():
 
 
 def test_safetensors_auto_prefetch_on_wekafs(monkeypatch, tmp_path):
+    safetensors_path_0 = tmp_path / "model-00001-of-00002.safetensors"
+    safetensors_path_1 = tmp_path / "model-00002-of-00002.safetensors"
+    save_file({"weight_0": torch.ones(1)}, str(safetensors_path_0))
+    save_file({"weight_1": torch.ones(1)}, str(safetensors_path_1))
+    prefetched_files = []
+
+    monkeypatch.setattr(weight_utils, "_get_rank_and_world_size", lambda: (0, 1))
+    monkeypatch.setattr(weight_utils, "_get_fs_type", lambda _: "wekafs")
+    monkeypatch.setattr(weight_utils, "_get_checkpoints_size_bytes", lambda _: 1)
+    monkeypatch.setattr(weight_utils, "_get_available_ram_bytes", lambda: 1024)
+    monkeypatch.setattr(
+        weight_utils,
+        "_prefetch_all_checkpoints",
+        lambda files, **_: prefetched_files.append(files),
+    )
+
+    files = [str(safetensors_path_0), str(safetensors_path_1)]
+    loaded = dict(safetensors_weights_iterator(files, False))
+
+    assert prefetched_files == [files]
+    torch.testing.assert_close(loaded["weight_0"], torch.ones(1))
+    torch.testing.assert_close(loaded["weight_1"], torch.ones(1))
+
+
+def test_safetensors_auto_prefetch_skips_single_local_shard(
+    monkeypatch, tmp_path
+):
     safetensors_path = tmp_path / "model.safetensors"
     save_file({"weight": torch.ones(1)}, str(safetensors_path))
     prefetched_files = []
 
+    monkeypatch.setattr(weight_utils, "_get_rank_and_world_size", lambda: (0, 1))
     monkeypatch.setattr(weight_utils, "_get_fs_type", lambda _: "wekafs")
     monkeypatch.setattr(weight_utils, "_get_checkpoints_size_bytes", lambda _: 1)
     monkeypatch.setattr(weight_utils, "_get_available_ram_bytes", lambda: 1024)
@@ -49,7 +77,7 @@ def test_safetensors_auto_prefetch_on_wekafs(monkeypatch, tmp_path):
 
     loaded = dict(safetensors_weights_iterator([str(safetensors_path)], False))
 
-    assert prefetched_files == [[str(safetensors_path)]]
+    assert prefetched_files == []
     torch.testing.assert_close(loaded["weight"], torch.ones(1))
 
 

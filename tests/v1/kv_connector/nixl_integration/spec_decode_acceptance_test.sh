@@ -21,6 +21,10 @@
 #   MODEL_NAME          - target model (default: meta-llama/Llama-3.1-8B-Instruct)
 #   NUM_SPEC_TOKENS     - number of speculative tokens (default: 3)
 #   GPU_MEMORY_UTILIZATION - (default: 0.7)
+#   CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION
+#                       - gpu memory fraction for kv_buffer_device=cpu
+#                         (default: 0.2). Set to empty to use
+#                         GPU_MEMORY_UTILIZATION.
 #   ATTENTION_BACKEND   - attention backend to use
 #                         Default: TRITON_ATTN on ROCm, FLASH_ATTN on NVIDIA
 #                         Set to auto to let vLLM select the backend.
@@ -54,6 +58,7 @@ NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
+CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION=${CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION-0.2}
 BLOCK_SIZE=${BLOCK_SIZE:-16}
 PREFILL_INTERNAL_PORT_BASE=${PREFILL_INTERNAL_PORT_BASE:-30000}
 DECODE_INTERNAL_PORT_BASE=${DECODE_INTERNAL_PORT_BASE:-31000}
@@ -263,6 +268,14 @@ run_test_for_device() {
   local DECODE_HOSTS=()
   local DECODE_PORTS=()
   local GPU_IDX=0
+  local CACHE_ARGS=()
+  if [[ "$kv_device" == "cpu" && -n "$CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION" ]]; then
+    CACHE_ARGS=(--gpu-memory-utilization "$CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION")
+    echo "GPU memory util:   ${CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION}"
+  else
+    CACHE_ARGS=(--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION")
+    echo "GPU memory util:   ${GPU_MEMORY_UTILIZATION}"
+  fi
 
   # Start prefill instances and wait for each one before allocating the next
   # server. This keeps failures from leaving extra model servers spinning.
@@ -294,7 +307,7 @@ run_test_for_device() {
       --enforce-eager \
       --max-model-len $MAX_MODEL_LEN \
       --block-size ${BLOCK_SIZE} \
-      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      "${CACHE_ARGS[@]}" \
       --tensor-parallel-size $PREFILLER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
@@ -339,7 +352,7 @@ run_test_for_device() {
       --enforce-eager \
       --max-model-len $MAX_MODEL_LEN \
       --block-size ${BLOCK_SIZE} \
-      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      "${CACHE_ARGS[@]}" \
       --tensor-parallel-size $DECODER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
