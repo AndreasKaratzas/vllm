@@ -4,6 +4,7 @@
 from collections.abc import Set as AbstractSet
 from functools import partial
 
+from huggingface_hub.errors import GatedRepoError
 import numpy as np
 import pytest
 from PIL import Image
@@ -78,6 +79,12 @@ _IGNORE_MM_KEYS = {
     # attention_mask lets us ignore the difference.
     "ultravox": {"audio_features"},
 }
+
+
+def _is_gated_repo_error(exc: OSError) -> bool:
+    msg = str(exc).lower()
+    return "gated repo" in msg or "not in the authorized list" in msg
+
 
 MM_DATA_PATCHES = {
     "glmasr": glmasr_patch_mm_data,
@@ -209,6 +216,9 @@ def _test_processing_correctness(
         check_max_version=False,
         check_version_reason="vllm",
     )
+    max_model_len = model_info.max_model_len
+    if model_info.default.startswith("meta-llama/Llama-4-"):
+        max_model_len = min(max_model_len or 4096, 4096)
 
     model_config = ModelConfig(
         model_id,
@@ -222,7 +232,11 @@ def _test_processing_correctness(
         enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
+        max_model_len=max_model_len,
     )
+    if model_config.hf_config.model_type == "llama4":
+        num_batches = min(num_batches, 8)
+
     # Ensure that the cache can fit all of the data
     # (set after because ModelConfig would set it to 0 for encoder-decoder models)
     model_config.multimodal_config.mm_processor_cache_gb = 2048
@@ -432,13 +446,19 @@ def test_processing_correctness(
         )
     if model_id == "CohereLabs/cohere-transcribe-03-2026":
         pytest.skip("Fix later")
-
-    _test_processing_correctness(
-        model_id,
-        hit_rate=hit_rate,
-        num_batches=num_batches,
-        simplify_rate=simplify_rate,
-    )
+    try:
+        _test_processing_correctness(
+            model_id,
+            hit_rate=hit_rate,
+            num_batches=num_batches,
+            simplify_rate=simplify_rate,
+        )
+    except GatedRepoError as e:
+        pytest.skip(f"Gated model repo: {e}")
+    except OSError as e:
+        if _is_gated_repo_error(e):
+            pytest.skip(f"Gated model repo: {e}")
+        raise
 
 
 def _assert_inputs_equal(

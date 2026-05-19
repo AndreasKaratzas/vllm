@@ -33,12 +33,16 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# Model types whose hub tokenizer_class is incorrect and should be overridden with
-# TokenizersBackend (the generic fast tokenizer). Adding a model type here is always a
-# temporary workaround and better long term solutions are:
-# - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
+# Model types whose hub tokenizer_class is incorrect and should be overridden.
+# Adding a model type here is always a temporary workaround and better long
+# term solutions are:
+# - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers
+#   (better)
 # - Fix tokenizer_class on the hub for the affected models (best)
-_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl"}
+_MODEL_TYPES_WITH_TOKENIZER_CLASS_OVERRIDES: dict[str, str] = {
+    "internvl_chat": "transformers.models.qwen2.tokenization_qwen2.Qwen2Tokenizer",
+    "step3_vl": "transformers.tokenization_utils_tokenizers.TokenizersBackend",
+}
 
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
@@ -227,16 +231,16 @@ def get_tokenizer(
         )
 
     # Some models have an incorrect tokenizer_class on the hub.
-    # For these model types, bypass AutoTokenizer and use TokenizersBackend directly.
+    # For these model types, bypass AutoTokenizer and use the override directly.
     model_type = getattr(config, "model_type", None) if config else None
-    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
-        from transformers.tokenization_utils_tokenizers import TokenizersBackend
-
+    if model_type in _MODEL_TYPES_WITH_TOKENIZER_CLASS_OVERRIDES:
         logger.debug(
-            "Overriding tokenizer_class to TokenizersBackend for model_type=%r",
+            "Overriding tokenizer_class for model_type=%r",
             model_type,
         )
-        tokenizer_cls_ = TokenizersBackend
+        tokenizer_cls_ = resolve_obj_by_qualname(
+            _MODEL_TYPES_WITH_TOKENIZER_CLASS_OVERRIDES[model_type]
+        )
     elif tokenizer_cls == TokenizerLike:
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
     else:

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from functools import partial
 from typing import Any, TypeAlias
 
+from huggingface_hub.errors import GatedRepoError
 import numpy as np
 import pytest
 import torch
@@ -44,6 +45,11 @@ VideoInput: TypeAlias = (
     list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
 )
 AudioInput = list[tuple[np.ndarray, int]]
+
+
+def _is_gated_repo_error(exc: OSError) -> bool:
+    msg = str(exc).lower()
+    return "gated repo" in msg or "not in the authorized list" in msg
 
 
 def _resize_data(
@@ -188,19 +194,27 @@ def test_model_tensor_schema(model_id: str):
     else:
         dtype = model_info.dtype
 
-    model_config = ModelConfig(
-        model_id,
-        tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-        hf_overrides=hf_overrides_fn,
-        skip_tokenizer_init=model_info.require_embed_inputs,
-        enable_prompt_embeds=model_info.require_embed_inputs,
-        enable_mm_embeds=model_info.require_embed_inputs,
-        enforce_eager=model_info.enforce_eager,
-        dtype=dtype,
-    )
+    try:
+        model_config = ModelConfig(
+            model_id,
+            tokenizer=model_info.tokenizer or model_id,
+            tokenizer_mode=model_info.tokenizer_mode,
+            revision=model_info.revision,
+            trust_remote_code=model_info.trust_remote_code,
+            hf_overrides=hf_overrides_fn,
+            skip_tokenizer_init=model_info.require_embed_inputs,
+            enable_prompt_embeds=model_info.require_embed_inputs,
+            enable_mm_embeds=model_info.require_embed_inputs,
+            enforce_eager=model_info.enforce_eager,
+            dtype=dtype,
+            max_model_len=model_info.max_model_len,
+        )
+    except GatedRepoError as exc:
+        pytest.skip(f"Gated model repo: {exc}")
+    except OSError as exc:
+        if _is_gated_repo_error(exc):
+            pytest.skip(f"Gated model repo: {exc}")
+        raise
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     assert supports_multimodal(model_cls)
@@ -218,10 +232,16 @@ def test_model_tensor_schema(model_id: str):
     if not any(inputs_parse_methods):
         pytest.skip(f"{model_arch} does not support tensor schema validation.")
 
-    ctx = InputProcessingContext(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
+    try:
+        tokenizer = cached_tokenizer_from_config(model_config)
+    except GatedRepoError as exc:
+        pytest.skip(f"Gated model repo: {exc}")
+    except OSError as exc:
+        if _is_gated_repo_error(exc):
+            pytest.skip(f"Gated model repo: {exc}")
+        raise
+
+    ctx = InputProcessingContext(model_config, tokenizer=tokenizer)
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()
     limit_mm_per_prompt = {

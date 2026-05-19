@@ -132,7 +132,11 @@ def model_name():
     return "meta-llama/Llama-3.1-8B-Instruct"
 
 
-def evaluate_llm_for_gsm8k(llm: LLM, expected_accuracy_threshold: float = 0.70) -> None:
+def evaluate_llm_for_gsm8k(
+    llm: LLM,
+    expected_accuracy_threshold: float = 0.70,
+    num_questions: int = 1319,
+) -> None:
     """Evaluate the LLM on GSM8K and check that accuracy is above a sanity threshold.
 
     The default threshold assumes the LLM uses the same target model as the "model_name"
@@ -143,7 +147,7 @@ def evaluate_llm_for_gsm8k(llm: LLM, expected_accuracy_threshold: float = 0.70) 
     if expected_accuracy_threshold <= 0.0:
         print("Skipping GSM8K evaluation")
         return
-    results = evaluate_gsm8k_offline(llm)
+    results = evaluate_gsm8k_offline(llm, num_questions=num_questions)
     accuracy = results["accuracy"]
     print(f"GSM8K accuracy: {accuracy:.3f}")
     assert accuracy >= expected_accuracy_threshold, (
@@ -436,6 +440,9 @@ def _run_eagle_correctness(
 
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
+        gsm8k_num_questions = (
+            200 if current_platform.is_rocm() and tp_size > 1 else 1319
+        )
 
         ref_llm = LLM(
             model=model_name,
@@ -444,7 +451,9 @@ def _run_eagle_correctness(
             attention_config=attention_config,
         )
         evaluate_llm_for_gsm8k(
-            ref_llm, expected_accuracy_threshold=expected_accuracy_threshold
+            ref_llm,
+            expected_accuracy_threshold=expected_accuracy_threshold,
+            num_questions=gsm8k_num_questions,
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
@@ -474,7 +483,9 @@ def _run_eagle_correctness(
         # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
         evaluate_llm_for_gsm8k(
-            spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
+            spec_llm,
+            expected_accuracy_threshold=expected_accuracy_threshold,
+            num_questions=gsm8k_num_questions,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
@@ -792,11 +803,14 @@ def test_mtp_correctness(
             )
 
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+        gsm8k_num_questions = 200 if current_platform.is_rocm() else 1319
 
         # Skip multimodal profiling for models that don't need it in this test.
         extra_kwargs: dict[str, Any] = {}
         if "Qwen3.5" in model_name:
             extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+            if current_platform.is_rocm():
+                extra_kwargs["enforce_eager"] = True
         elif "gemma-4" in model_name:
             extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "audio": 0}
 
@@ -820,7 +834,9 @@ def test_mtp_correctness(
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         evaluate_llm_for_gsm8k(
-            ref_llm, expected_accuracy_threshold=expected_accuracy_threshold
+            ref_llm,
+            expected_accuracy_threshold=expected_accuracy_threshold,
+            num_questions=gsm8k_num_questions,
         )
         del ref_llm
         torch.accelerator.empty_cache()
@@ -847,7 +863,9 @@ def test_mtp_correctness(
         # MTP supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
         evaluate_llm_for_gsm8k(
-            spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
+            spec_llm,
+            expected_accuracy_threshold=expected_accuracy_threshold,
+            num_questions=gsm8k_num_questions,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0

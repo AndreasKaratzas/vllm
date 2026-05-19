@@ -382,6 +382,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny": "ai21labs/Jamba-tiny-dev",
             "random": "ai21labs/Jamba-tiny-random",
         },
+        max_model_len=4096,
     ),
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
@@ -409,6 +410,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Llama4ForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        max_model_len=10240,
     ),
     "LongcatFlashForCausalLM": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat", trust_remote_code=True
@@ -441,14 +443,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             )
         },
     ),
-    "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
+    "MiniMaxForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-Text-01-hf", max_model_len=4096
+    ),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-Text-01",
         trust_remote_code=True,
         revision="a59aa9cbc53b9fb8742ca4e9e1531b9802b6fdc3",
     ),
     "MiniMaxM1ForCausalLM": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-M1-40k", trust_remote_code=True
+        "MiniMaxAI/MiniMax-M1-40k", trust_remote_code=True, max_model_len=4096
     ),
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M2",

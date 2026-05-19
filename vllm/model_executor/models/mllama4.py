@@ -551,9 +551,23 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(Llama4Config)
 
     def get_hf_processor(self, **kwargs: object) -> Llama4Processor:
-        return self.ctx.get_hf_processor(
-            Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
+        use_fast = kwargs.pop("use_fast", True)
+        cache_key = (use_fast, tuple(sorted(kwargs.items())))
+        try:
+            hash(cache_key)
+        except TypeError:
+            return self.ctx.get_hf_processor(
+                Llama4Processor, use_fast=use_fast, **kwargs
+            )
+
+        cache: dict[object, Llama4Processor] = self.__dict__.setdefault(
+            "_hf_processor_cache", {}
         )
+        if cache_key not in cache:
+            cache[cache_key] = self.ctx.get_hf_processor(
+                Llama4Processor, use_fast=use_fast, **kwargs
+            )
+        return cache[cache_key]
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability

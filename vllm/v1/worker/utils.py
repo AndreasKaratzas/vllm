@@ -92,6 +92,9 @@ class KVBlockZeroer:
         self._id_cap: int = 0
         self._ids_pinned: torch.Tensor | None = None
         self._ids_gpu: torch.Tensor | None = None
+        self._fallback_entries: list[tuple[torch.Tensor, int, int]] = []
+        self._use_torch_fallback = False
+        self._fallback_warning_logged = False
 
     def init_meta(
         self,
@@ -116,6 +119,7 @@ class KVBlockZeroer:
         """
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
+        fallback_entries: list[tuple[torch.Tensor, int, int]] = []
         page_size_el: int | None = None
 
         for group in attn_groups_iter:
@@ -143,6 +147,7 @@ class KVBlockZeroer:
                 if dp in seen_ptrs:
                     continue
                 seen_ptrs.add(dp)
+                fallback_entries.append((kv, block_dim, ratio))
 
                 el = kv.element_size()
                 cur_bytes = kv.stride(block_dim) * el
@@ -169,6 +174,7 @@ class KVBlockZeroer:
 
         if not seg_addrs or page_size_el is None:
             self._meta = None
+            self._fallback_entries = []
             return
 
         blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
@@ -185,10 +191,28 @@ class KVBlockZeroer:
             blk_size,
             len(seg_addrs),
         )
+        self._fallback_entries = fallback_entries
+
+    def _zero_block_ids_torch(self, block_ids: list[int]) -> None:
+        """Torch fallback used when the Triton zeroing kernel cannot launch."""
+        unique_block_ids = sorted(set(block_ids))
+        for kv, block_dim, ratio in self._fallback_entries:
+            num_blocks = kv.shape[block_dim]
+            for block_id in unique_block_ids:
+                start = block_id * ratio
+                end = min(start + ratio, num_blocks)
+                if start >= num_blocks:
+                    continue
+                slices = [slice(None)] * kv.ndim
+                slices[block_dim] = slice(start, end)
+                kv[tuple(slices)].zero_()
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._meta is None:
+            return
+        if self._use_torch_fallback:
+            self._zero_block_ids_torch(block_ids)
             return
         seg_addrs, page_size_el, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
@@ -207,14 +231,25 @@ class KVBlockZeroer:
         idx = self._ids_gpu[:n_blocks]
         idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
         grid = (n_blocks * n_segs * (page_size_el // blk_size),)
-        _zero_kv_blocks_kernel[grid](
-            seg_addrs,
-            idx,
-            n_blocks,
-            N_SEGS=n_segs,
-            PAGE_SIZE_EL=page_size_el,
-            BLOCK_SIZE=blk_size,
-        )
+        try:
+            _zero_kv_blocks_kernel[grid](
+                seg_addrs,
+                idx,
+                n_blocks,
+                N_SEGS=n_segs,
+                PAGE_SIZE_EL=page_size_el,
+                BLOCK_SIZE=blk_size,
+            )
+        except OSError as exc:
+            self._use_torch_fallback = True
+            if not self._fallback_warning_logged:
+                logger.warning(
+                    "Falling back to torch KV block zeroing after Triton "
+                    "kernel launch failed: %s",
+                    exc,
+                )
+                self._fallback_warning_logged = True
+            self._zero_block_ids_torch(block_ids)
 
 
 @dataclass
