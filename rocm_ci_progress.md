@@ -14014,10 +14014,12 @@ Log findings:
   path. `OpenGVLab/InternVL3-1B` still resolves to `InternVLChatModel` and
   initializes successfully.
 
-Change:
+Final change:
 
-- Moved the `InternVLChatModel` registry default to `OpenGVLab/InternVL3-1B`
-  and kept `OpenGVLab/InternVL2-1B` as an explicit extra model id.
+- Keep the canonical registry default ids for InternVL, StarCoder/GPTBigCode,
+  Plamo3, Jamba, and Cohere2. Earlier local experiments moved some defaults to
+  accessible mirrors or smaller repos, but that was rejected because Buildkite
+  should exercise the canonical ids when its token has access.
 - Capped `MiniMaxM1ForCausalLM` initialization smoke tests at `4096` tokens.
   The default config reports a `10240000` token context and produced a
   52,428,800,000-token synthetic KV-cache capacity calculation in the shard
@@ -14026,82 +14028,20 @@ Change:
   matching the existing `Llama4ForConditionalGeneration` cap. The uncapped row
   used `10485760` tokens and was the direct cause of the local shard memory
   failure after MiniMaxM1.
-- Moved the `GPTBigCodeForCausalLM` default from gated `bigcode/starcoder` to
-  accessible `bigcode/tiny_starcoder_py`; `bigcode/starcoder` remains available
-  as an explicit extra model id.
-- Moved the `Plamo3ForCausalLM` default from gated
-  `pfnet/plamo-3-nict-2b-base` to accessible
-  `WayBob/Way-sft-plamo-3-8b-chat`, which still resolves to
-  `Plamo3ForCausalLM`; the gated official id remains as an explicit extra.
-- Capped `MiniMaxForCausalLM` initialization smoke tests at `4096` tokens for
-  the same reason as MiniMaxM1: the default config advertises a `10240000`
-  token context and turns a load-format=dummy smoke test into an enormous
-  synthetic KV-cache sizing exercise.
-- Moved the `JambaForCausalLM` default from gated
-  `ai21labs/AI21-Jamba-1.5-Mini` to ungated `ai21labs/Jamba-tiny-random`,
-  kept the 1.5 Mini id as an explicit extra, and capped the smoke-test context
-  at `4096` tokens.
-- Moved the `Cohere2ForCausalLM` default from gated
-  `CohereLabs/c4ai-command-r7b-12-2024` to ungated
-  `estrogen/c4ai-command-r7b-12-2024`, which keeps the production-size
-  `128`-wide attention heads that ROCm supports. The tiny public Cohere2 repo
-  is accessible but has `head_size=2`, which ROCm attention backends reject.
+- Capped `MiniMaxForCausalLM` and `JambaForCausalLM` smoke-test contexts at
+  `4096` tokens for the same reason: avoid turning load-format=dummy
+  initialization checks into enormous synthetic KV-cache sizing exercises.
 - Added explicit `LLM` engine-core shutdown and distributed memory cleanup to
   `tests/models/test_initialization.py`. The initialization registry test
   creates hundreds of `LLM` instances in one pytest process; without explicit
   cleanup, delayed GPU release from one row can make the next row fail the V1
   startup free-memory guard even though the row itself is valid.
 
-Focused validation:
-
-```text
-HIP_VISIBLE_DEVICES=0 CUDA_VISIBLE_DEVICES=0 pytest -v -s \
-  'tests/models/test_initialization.py::test_can_initialize_small_subset[InternVLChatModel]'
-```
-
-Result: `1 passed` in `34.52s`.
-
-```text
-HIP_VISIBLE_DEVICES=5 pytest -q -s \
-  'tests/models/test_initialization.py::test_can_initialize_large_subset[MiniMaxM1ForCausalLM]'
-```
-
-Result: `1 passed` in `35.47s`.
-
-```text
-HIP_VISIBLE_DEVICES=5 pytest -q -s \
-  'tests/models/test_initialization.py::test_can_initialize_large_subset[Llama4ForCausalLM]'
-```
-
-Result: `1 passed` in `57.40s`.
-
-```text
-HIP_VISIBLE_DEVICES=5 pytest -q -s \
-  'tests/models/test_initialization.py::test_can_initialize_large_subset[GPTBigCodeForCausalLM]'
-```
-
-Result: `1 passed` in `42.75s`.
-
-```text
-HIP_VISIBLE_DEVICES=7 pytest -q -s \
-  'tests/models/test_initialization.py::test_can_initialize_large_subset[Plamo3ForCausalLM]'
-```
-
-Result: `1 passed` in `48.48s`.
-
-```text
-HIP_VISIBLE_DEVICES=5 pytest -q -s \
-  'tests/models/test_initialization.py::test_can_initialize_large_subset[MiniMaxForCausalLM]'
-```
-
-Result: `1 passed` in `31.69s`.
-
-```text
-HIP_VISIBLE_DEVICES=5 pytest -q -s \
-  'tests/models/test_initialization.py::test_can_initialize_large_subset[JambaForCausalLM]'
-```
-
-Result: `1 passed` in `40.46s`.
+Focused validation before the registry defaults were restored showed that the
+length caps and cleanup path addressed the oversized-context and back-to-back
+initialization failures. After restoration, local runs with the available token
+skip canonical gated repos when the hub rejects access, while Buildkite tokens
+with access continue into the real checks.
 
 ```text
 CUDA_VISIBLE_DEVICES=3 HIP_VISIBLE_DEVICES=3 pytest -q -s \
