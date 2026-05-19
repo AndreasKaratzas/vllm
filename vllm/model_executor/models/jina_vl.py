@@ -12,6 +12,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing import ProcessorInputs, TimingContext
+from vllm.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsMultiModal, SupportsScoreTemplate
@@ -65,9 +67,23 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         # query prompt is placed after the document prompt in the score
         # template for JinaVLForRanking model, but in mm_data they are
         # stored in the opposite order (query first, then document).
-        for _, value in mm_data.items():
-            value.reverse()
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        reversed_mm_data = {
+            modality: list(reversed(value)) if isinstance(value, list) else value
+            for modality, value in mm_data.items()
+        }
+        return super()._call_hf_processor(
+            prompt, reversed_mm_data, mm_kwargs, tok_kwargs
+        )
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        # JinaVL reverses multimodal order to align query/document score
+        # templates. The generic processor cache assumes cached per-item
+        # outputs merge back in the original input order, so bypass it here.
+        return self._apply_hf_processor(inputs, timing_ctx)
 
 
 @MULTIMODAL_REGISTRY.register_processor(

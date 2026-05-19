@@ -40,10 +40,15 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    ProcessorInputs,
+    TimingContext,
+)
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    MultiModalProcessingInfo,
     MultiModalPromptUpdates,
     MultiModalPromptUpdatesApplyResult,
     PlaceholderFeaturesInfo,
@@ -206,6 +211,17 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
 
 
 class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]):
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        # Gemma3n audio features are not strictly per-item invariant: the HF
+        # processor can produce different audio masks for the same audio when
+        # the surrounding multimodal batch changes. The generic processor cache
+        # assumes per-item invariance, so use the uncached path for this model.
+        return self._apply_hf_processor(inputs, timing_ctx)
+
     def _call_hf_processor(
         self,
         prompt: str,

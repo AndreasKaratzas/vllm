@@ -14378,3 +14378,49 @@ llama3-8b-eagle3: acceptance_length=2.580 (expected=2.600)
 
 No C/CUDA source was changed in this pass, so `../vllm-scripts/rebuild.sh` was
 not required.
+
+### Processing Correctness Skip Cleanup
+
+Follow-up from review:
+
+- Removed the vague `pytest.skip("Fix later")` entries from
+  `tests/models/multimodal/processing/test_common.py`.
+- `OpenGVLab/InternVL2-2B` passes the common processor correctness test once
+  the skip is removed.
+- `google/gemma-3n-E2B-it` exposed that Gemma3n audio processor outputs are
+  not per-item invariant: the same audio can produce different feature masks
+  when the surrounding multimodal batch changes. `Gemma3nMultiModalProcessor`
+  now bypasses the generic processor-only cache, whose merge logic assumes
+  per-item invariance.
+- `jinaai/jina-reranker-m0` exposed the same generic-cache assumption from a
+  different angle: JinaVL reverses multimodal order to align query/document
+  score templates. The processor now reverses a copy of the HF data instead
+  of mutating it in place and bypasses the generic processor-only cache.
+- `CohereLabs/cohere-transcribe-03-2026` also passes the common processor
+  correctness test; the skip was simply stale.
+
+Validation:
+
+```text
+CUDA_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= pytest -v -s -rs \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-google/gemma-3n-E2B-it]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-google/gemma-3n-E2B-it]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-google/gemma-3n-E2B-it]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-OpenGVLab/InternVL2-2B]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-OpenGVLab/InternVL2-2B]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-OpenGVLab/InternVL2-2B]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-jinaai/jina-reranker-m0]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-jinaai/jina-reranker-m0]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-jinaai/jina-reranker-m0]'
+```
+
+Result: `9 passed` in `36.43s`.
+
+```text
+CUDA_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= pytest -v -s -rs \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-CohereLabs/cohere-transcribe-03-2026]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-CohereLabs/cohere-transcribe-03-2026]' \
+  'tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-CohereLabs/cohere-transcribe-03-2026]'
+```
+
+Result: `3 passed` in `22.45s`.
