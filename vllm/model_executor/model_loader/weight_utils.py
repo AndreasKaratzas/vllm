@@ -804,6 +804,12 @@ def _should_auto_prefetch_on_fs(fs_type: str) -> bool:
     return fs_type.lower() in _SAFETENSORS_AUTO_PREFETCH_FS_TYPES
 
 
+def _get_rank_and_world_size() -> tuple[int, int]:
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_rank(), torch.distributed.get_world_size()
+    return 0, 1
+
+
 def _prefetch_checkpoint(
     file_path: str,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
@@ -832,12 +838,7 @@ def _prefetch_all_checkpoints(
     if block_size < 1:
         raise ValueError("safetensors prefetch block size must be >= 1")
 
-    if torch.distributed.is_initialized():
-        rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
-    else:
-        rank = 0
-        world_size = 1
+    rank, world_size = _get_rank_and_world_size()
     paths_to_prefetch = sorted_files[rank::world_size]
     total_for_rank = len(paths_to_prefetch)
 
@@ -919,6 +920,8 @@ def safetensors_weights_iterator(
 
     fs_type = _get_fs_type(sorted_files)
     is_net_fs = _should_auto_prefetch_on_fs(fs_type)
+    rank, world_size = _get_rank_and_world_size()
+    num_local_shards = len(sorted_files[rank::world_size])
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
     avail_bytes = _get_available_ram_bytes()
     ram_threshold_pct = 90
@@ -935,8 +938,19 @@ def safetensors_weights_iterator(
 
     should_prefetch = safetensors_load_strategy == "prefetch"
     if safetensors_load_strategy is None:
-        if is_net_fs and fits_in_ram:
+        if is_net_fs and fits_in_ram and num_local_shards > 1:
             should_prefetch = True
+        elif is_net_fs and fits_in_ram:
+            logger.info_once(
+                "Auto-prefetch is disabled because rank %d has only %d "
+                "checkpoint shard(s) on %s. Prefetching a single local shard "
+                "would duplicate the foreground safetensors read. If you want "
+                "to force prefetching, start vLLM with "
+                "--safetensors-load-strategy=prefetch.",
+                rank,
+                num_local_shards,
+                fs_name,
+            )
         elif is_net_fs and not fits_in_ram:
             logger.warning_once(
                 "Network filesystem (%s) detected but checkpoint total size "

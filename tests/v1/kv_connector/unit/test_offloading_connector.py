@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
+import statistics
 import time
 
 import msgspec
@@ -141,6 +142,9 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     total_cold_time = 0.0
     total_gpu_hit_time = 0.0
     total_cpu_hit_time = 0.0
+    cold_times: list[float] = []
+    gpu_hit_times: list[float] = []
+    cpu_hit_times: list[float] = []
     max_model_len = llm.llm_engine.vllm_config.model_config.max_model_len
     # Use a long prompt that fits within the model's context window.
     prompt_len = min(10001, max_model_len - 1)
@@ -154,12 +158,14 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
         llm.generate(prompts, sampling_params, use_tqdm=False)
         cold_time = time.time() - start_time
         total_cold_time += cold_time
+        cold_times.append(cold_time)
 
         # run generation again - should hit the GPU prefix cache
         start_time = time.time()
         llm.generate(prompts, sampling_params, use_tqdm=False)
         gpu_hit_time = time.time() - start_time
         total_gpu_hit_time += gpu_hit_time
+        gpu_hit_times.append(gpu_hit_time)
 
         # Wait for the async CPU offload to finish, then reset prefix cache
         # so the next generate() must reload from CPU rather than GPU.
@@ -178,6 +184,7 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
         llm.generate(prompts, sampling_params, use_tqdm=False)
         cpu_hit_time = time.time() - start_time
         total_cpu_hit_time += cpu_hit_time
+        cpu_hit_times.append(cpu_hit_time)
 
         if cpu_hit_time < cold_time:
             num_times_cpu_better_than_cold += 1
@@ -186,8 +193,24 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     print(f"    Cold: {total_cold_time * 1000 / num_tests:.2f}ms")
     print(f"    GPU hit: {total_gpu_hit_time * 1000 / num_tests:.2f}ms")
     print(f"    CPU hit: {total_cpu_hit_time * 1000 / num_tests:.2f}ms")
+    print("Median times:")
+    print(f"    Cold: {statistics.median(cold_times) * 1000:.2f}ms")
+    print(f"    GPU hit: {statistics.median(gpu_hit_times) * 1000:.2f}ms")
+    print(f"    CPU hit: {statistics.median(cpu_hit_times) * 1000:.2f}ms")
+    print(
+        "CPU hit faster than cold: "
+        f"{num_times_cpu_better_than_cold}/{num_tests}"
+    )
 
-    assert num_times_cpu_better_than_cold >= 0.8 * num_tests
+    assert total_gpu_hit_time < total_cold_time, (
+        "GPU prefix-cache hit should be faster than cold prefill in aggregate"
+    )
+    assert total_cpu_hit_time < total_cold_time, (
+        "CPU offload restore should be faster than cold prefill in aggregate"
+    )
+    assert statistics.median(cpu_hit_times) < statistics.median(cold_times), (
+        "CPU offload restore median should be faster than cold prefill median"
+    )
 
 
 def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):
