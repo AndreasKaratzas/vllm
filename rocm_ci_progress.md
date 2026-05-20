@@ -14424,3 +14424,214 @@ CUDA_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= pytest -v -s -rs \
 ```
 
 Result: `3 passed` in `22.45s`.
+
+### AMD CI 8613 Quantization Follow-Up
+
+Test groups:
+
+- `mi355_1: Quantization`
+- `mi355_1: Quantized Models Test`
+- `mi355_1: Language Models Tests (Standard)`
+
+Current minimal changes:
+
+- `quantization/test_gfx950_moe.py`: direct MXFP4 backend-selection tests call
+  the oracle outside a live `VllmConfig`. The activation override lookup now uses
+  `get_current_vllm_config_or_none()`, so missing current config means "no user
+  override" without hiding unrelated assertion failures.
+- `quantization/test_quark.py`: Quark OCP MX MoE already had an emulation
+  fallback, but the newer oracle raises `NotImplementedError` for unsupported
+  native CUDA/ROCm deployments before that fallback can run. Quark now catches
+  only the exact unsupported-native message and falls back to emulation as
+  intended. Other `NotImplementedError`s still propagate.
+- `models/quantization/test_awq.py`: the InternVL2 AWQ source model hit a
+  thread-pooled tokenizer that did not expose `max_chars_per_token`. The pool
+  wrapper now carries the same cached tokenizer bounds used by the normal HF
+  tokenizer wrapper.
+- `tools/vllm-rocm/aiter_tiny_mixtral_repro.py`: added a focused diagnostic
+  script for the tiny-mixtral ROCm AITER top-k parity issue. It mirrors the
+  `test_common.py` prompt set, ROCm SDP settings, `VLLM_ROCM_USE_SKINNY_GEMM=0`,
+  vLLM max-length/block-size/chunked-prefill settings, and stops at the same
+  first top-k-incompatible generated-token mismatch that the pytest helper uses.
+  It also has `--repeat` for catching the intermittent form seen in the exact
+  language shard.
+- `issue.md`: added a draft upstream issue using the minimal AITER repro,
+  Buildkite failure details, expected top-k parity behavior, and the local
+  `--repeat 3 --no-fail` result.
+- Not kept after review: the Qwen3 MXFP8 revision pin, the extra tokenizer unit
+  test, and the single-shard WEKAFS auto-eager loader/docstring changes. The
+  revision pin points to an infra/cache inconsistency, the extra unit test is not
+  needed for the requested minimal regression diff, and the WEKAFS eager change
+  is a separate IO-performance policy change rather than a proven branch
+  regression.
+- Language-models note: I did not keep a `TitanML/tiny-mixtral` test workaround
+  that disabled AITER Linear/MoE. That made the row pass by avoiding the backend
+  under investigation, so the useful artifact is the standalone repro script
+  and draft AITER report below.
+
+Validation:
+
+```text
+pytest -q tests/quantization/test_gfx950_moe.py::test_w4a4_raises_without_aiter_and_no_moe_backend \
+  tests/quantization/test_gfx950_moe.py::test_w4a4_dispatches_to_emulation_with_moe_backend --tb=short
+```
+
+Result: `2 passed` in `1.52s`.
+
+```text
+HIP_VISIBLE_DEVICES=2 CUDA_VISIBLE_DEVICES=2 VLLM_TEST_FORCE_LOAD_FORMAT=auto \
+  pytest -v -s "tests/quantization/test_quark.py::test_ocp_mx_wikitext_correctness[tp_size:1-config:AccuracyTestConfig(model_name='fxmarty/qwen_1.5-moe-a2.7b-mxfp4', excepted_value=12.53)]" --tb=short
+```
+
+Result after narrowing the Quark fallback and replacing the oracle assertion
+catch with `get_current_vllm_config_or_none()`: `1 passed` in `246.67s`.
+
+```text
+HIP_VISIBLE_DEVICES=1 CUDA_VISIBLE_DEVICES=1 pytest -q \
+  'tests/models/quantization/test_awq.py::test_awq_models[5-128-half-size_factors0-OpenGVLab/InternVL2-2B-OpenGVLab/InternVL2-2B-AWQ]' --tb=short
+HIP_VISIBLE_DEVICES=3 CUDA_VISIBLE_DEVICES=3 pytest -q \
+  'tests/models/quantization/test_awq.py::test_awq_models[5-128-half-size_factors1-OpenGVLab/InternVL2-2B-OpenGVLab/InternVL2-2B-AWQ]' --tb=short
+HIP_VISIBLE_DEVICES=4 CUDA_VISIBLE_DEVICES=4 pytest -q \
+  'tests/models/quantization/test_awq.py::test_awq_models[5-128-half-size_factors2-OpenGVLab/InternVL2-2B-OpenGVLab/InternVL2-2B-AWQ]' --tb=short
+```
+
+Result: all 3 AWQ InternVL2 rows passed.
+
+- `size_factors0`: `1 passed` in `47.86s`
+- `size_factors1`: `1 passed` in `51.17s`
+- `size_factors2`: `1 passed` in `56.23s`
+
+Unpinned dense MXFP8 local check:
+
+```text
+HIP_VISIBLE_DEVICES=0 CUDA_VISIBLE_DEVICES=0 pytest -q \
+  tests/models/quantization/test_mxfp8.py::test_mxfp8_generation[dense] --tb=short
+```
+
+Result: `1 passed` in `28.47s`.
+
+The dense MXFP8 Buildkite failure was:
+
+```text
+Value error, Unrecognized model in Qwen/Qwen3-0.6B. Should have a `model_type`
+key in its config.json.
+```
+
+Pinning the model revision makes the row pass locally, but that is not a vLLM
+regression fix. The current diff leaves this test untouched and treats it as a
+Buildkite/HF cache resolution issue to report separately.
+
+```text
+VLLM_TEST_GROUP_NAME=mi355_1-language-models-tests-standard \
+VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 HIP_VISIBLE_DEVICES=5 CUDA_VISIBLE_DEVICES=5 \
+pytest -v -s tests/models/language -m 'core_model and (not slow_test)' --tb=short
+```
+
+Initial result after removing the extra AITER Linear/MoE disables:
+`2 failed, 13 passed, 9 skipped, 364 deselected` in `568.73s`.
+
+Failures matched Buildkite:
+
+- `models/language/generation/test_common.py::test_models[True-True-5-32-TitanML/tiny-mixtral]`
+- `models/language/generation/test_common.py::test_models[False-True-5-32-TitanML/tiny-mixtral]`
+
+The failing top-k violation was the same near-uniform-logit tiny-mixtral case:
+HF wanted token `9833` (`Image`) while vLLM chose token `22397` (`avirus`), and
+HF's token was outside vLLM's top-5 at that step.
+
+Focused reruns:
+
+```text
+VLLM_TEST_GROUP_NAME=mi355_1-language-models-tests-standard \
+VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 HIP_VISIBLE_DEVICES=5 CUDA_VISIBLE_DEVICES=5 \
+pytest -q -s \
+  'tests/models/language/generation/test_common.py::test_models[False-False-5-32-TitanML/tiny-mixtral]' \
+  --tb=short
+```
+
+Result: `1 passed` in `50.52s`.
+
+```text
+VLLM_TEST_GROUP_NAME=mi355_1-language-models-tests-standard \
+VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 HIP_VISIBLE_DEVICES=5 CUDA_VISIBLE_DEVICES=5 \
+pytest -q -s \
+  'tests/models/language/generation/test_common.py::test_models[False-True-5-32-TitanML/tiny-mixtral]' \
+  --tb=short
+```
+
+Result: `1 passed` in `42.59s`.
+
+```text
+VLLM_TEST_GROUP_NAME=mi355_1-language-models-tests-standard \
+VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 HIP_VISIBLE_DEVICES=5 CUDA_VISIBLE_DEVICES=5 \
+pytest -q -s \
+  'tests/models/language/generation/test_common.py::test_models[True-True-5-32-openai-community/gpt2]' \
+  'tests/models/language/generation/test_common.py::test_models[True-True-5-32-meta-llama/Llama-3.2-1B-Instruct]' \
+  'tests/models/language/generation/test_common.py::test_models[True-True-5-32-openbmb/MiniCPM4.1-8B]' \
+  'tests/models/language/generation/test_common.py::test_models[True-True-5-32-facebook/opt-125m]' \
+  'tests/models/language/generation/test_common.py::test_models[True-True-5-32-TitanML/tiny-mixtral]' \
+  'tests/models/language/generation/test_common.py::test_models[True-False-5-32-openai-community/gpt2]' \
+  'tests/models/language/generation/test_common.py::test_models[True-False-5-32-meta-llama/Llama-3.2-1B-Instruct]' \
+  'tests/models/language/generation/test_common.py::test_models[True-False-5-32-openbmb/MiniCPM4.1-8B]' \
+  'tests/models/language/generation/test_common.py::test_models[True-False-5-32-facebook/opt-125m]' \
+  'tests/models/language/generation/test_common.py::test_models[True-False-5-32-TitanML/tiny-mixtral]' \
+  'tests/models/language/generation/test_common.py::test_models[False-True-5-32-openai-community/gpt2]' \
+  'tests/models/language/generation/test_common.py::test_models[False-True-5-32-meta-llama/Llama-3.2-1B-Instruct]' \
+  'tests/models/language/generation/test_common.py::test_models[False-True-5-32-openbmb/MiniCPM4.1-8B]' \
+  'tests/models/language/generation/test_common.py::test_models[False-True-5-32-facebook/opt-125m]' \
+  'tests/models/language/generation/test_common.py::test_models[False-True-5-32-TitanML/tiny-mixtral]' \
+  --tb=short
+```
+
+Result: `8 passed, 7 skipped` in `285.61s`.
+
+```text
+HIP_VISIBLE_DEVICES=5 CUDA_VISIBLE_DEVICES=5 \
+python tools/vllm-rocm/aiter_tiny_mixtral_repro.py --repeat 3 --no-fail
+```
+
+Result: `PASS` for 3 iterations. The script still prints the exact top-k
+ordering and can be used with higher `--repeat N` values to capture the
+intermittent shard failure without changing the test or disabling AITER
+kernels.
+
+Draft AITER report:
+
+```text
+Title: ROCm AITER tiny-mixtral top-k parity intermittently fails on MI355
+
+Environment:
+- GPU: MI355 / gfx950
+- vLLM branch: wip-ci-fix
+- Model: TitanML/tiny-mixtral
+- Test: tests/models/language/generation/test_common.py
+- Env: VLLM_ROCM_USE_AITER=1, VLLM_ROCM_USE_AITER_RMSNORM=0,
+  VLLM_ROCM_USE_SKINNY_GEMM=0
+
+Observed:
+The exact AMD language shard intermittently fails:
+
+VLLM_TEST_GROUP_NAME=mi355_1-language-models-tests-standard \
+VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 HIP_VISIBLE_DEVICES=5 CUDA_VISIBLE_DEVICES=5 \
+pytest -v -s tests/models/language -m 'core_model and (not slow_test)' --tb=short
+
+Failure:
+HF top-5 includes token 9833 / "Image" as rank 1, while vLLM chooses token
+22397 / "avirus"; HF's token is outside vLLM's top-5 for the same generated
+step. The logits are very flat because TitanML/tiny-mixtral is an untrained
+tiny model, but the parity test expects top-k compatibility even when greedy
+tokens diverge.
+
+Notes:
+- Isolated tiny-mixtral rows pass locally.
+- The first 15 generation rows in collection order also pass locally.
+- A single-pass standalone diagnostic also passes, but it captures the same
+  top-k-compatible early divergences and can be repeated:
+  python tools/vllm-rocm/aiter_tiny_mixtral_repro.py --repeat N
+- Disabling AITER Linear/MoE makes the test pass but hides the backend issue,
+  so that workaround was removed.
+
+Expected:
+ROCm AITER Linear/MoE should keep the HF selected token inside vLLM's top-k
+when the test's RMSNorm AITER path is disabled.
+```

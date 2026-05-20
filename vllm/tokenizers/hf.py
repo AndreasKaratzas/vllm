@@ -40,6 +40,13 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
         return tokenizer
 
     og_tokenizer = copy.copy(tokenizer)
+    tokenizer_vocab = og_tokenizer.get_vocab()
+    max_token_id = max(tokenizer_vocab.values())
+    max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
+
+    if hasattr(og_tokenizer, "vocab_size"):
+        with contextlib.suppress(NotImplementedError):
+            max_token_id = max(max_token_id, og_tokenizer.vocab_size)
 
     tokenizer_pool: queue.Queue[PreTrainedTokenizerFast] = queue.Queue()
     for _ in range(copies):
@@ -57,6 +64,14 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
             tokenizer_pool.put(tok)
 
     class TokenizerPool(tokenizer.__class__, ThreadSafeHFTokenizerMixin):  # type: ignore
+        @property
+        def max_token_id(self) -> int:
+            return max_token_id
+
+        @property
+        def max_chars_per_token(self) -> int:
+            return max_chars_per_token
+
         def apply_chat_template(self, *args, **kwargs):
             with _borrow_from_pool() as tok:
                 return tok.apply_chat_template(*args, **kwargs)
