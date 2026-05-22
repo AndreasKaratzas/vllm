@@ -1892,12 +1892,13 @@ steps:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
-- label: Multi-Modal Processor (CPU) # TBD
+- label: Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   no_gpu: true
   optional: true
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1905,7 +1906,8 @@ steps:
   - tests/models/registry.py
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+  - pip install --upgrade git+https://github.com/huggingface/transformers
+  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Quantized Models Test # TBD
   timeout_in_minutes: 180
@@ -1921,11 +1923,12 @@ steps:
   commands:
   - pytest -v -s models/quantization
 
-- label: Transformers Nightly Models # TBD
+- label: Transformers Nightly Models %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
+  parallelism: 4
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -1940,13 +1943,13 @@ steps:
   - examples/
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_initialization.py
-  - pytest -v -s tests/models/test_transformers.py
-  - pytest -v -s tests/models/multimodal/processing/
-  - pytest -v -s tests/models/multimodal/test_mapping.py
-  - python3 examples/basic/offline_inference/chat.py
-  - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
-  - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
+  - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s tests/models/test_transformers.py; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s tests/models/multimodal/processing/; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s tests/models/multimodal/test_mapping.py; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then python3 examples/basic/offline_inference/chat.py; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper; fi
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
@@ -2405,17 +2408,38 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - HYBRID_SSM=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: V1 e2e (4 GPUs) # TBD
+- label: V1 e2e (4 GPUs) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
   optional: true
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1/e2e
   commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
+    - |
+      case "$$BUILDKITE_PARALLEL_JOB" in
+        0)
+          pytest -v -s \
+            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama3_eagle]' \
+            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama3_eagle]'
+          ;;
+        1)
+          pytest -v -s \
+            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama4_eagle]' \
+            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama4_eagle]'
+          ;;
+        2)
+          pytest -v -s \
+            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama4_eagle_mm]'
+          ;;
+        3)
+          pytest -v -s \
+            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama4_eagle_mm]'
+          ;;
+      esac
 
 - label: V1 e2e (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180

@@ -5,6 +5,9 @@
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
@@ -22,10 +25,9 @@ SCALES = [0.01, 0.1, 1.0]
 def _naive_fp8_quantize(
     tensor: torch.Tensor, scale: torch.Tensor, skip_scale: bool
 ) -> torch.Tensor:
-    """Reference FP8 quantization in PyTorch."""
+    """Reference FP8 quantization using vLLM's FP8 range contract."""
     fp8_dtype = current_platform.fp8_dtype()
-    fp8_max = torch.finfo(fp8_dtype).max
-    fp8_min = -fp8_max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     x = tensor.float()
     if not skip_scale:

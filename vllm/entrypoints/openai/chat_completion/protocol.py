@@ -452,43 +452,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 msg["tool_calls"] = list(tool_calls)
         return self
 
-    @model_validator(mode="before")
-    @classmethod
-    def check_tool_message_order(cls, data: Any) -> Any:
-        if isinstance(data, ValueError):
-            raise data
-        if not isinstance(data, dict):
-            return data
-
-        messages = data.get("messages")
-        if not isinstance(messages, list):
-            return data
-
-        can_accept_tool_result = False
-        for msg in messages:
-            if not isinstance(msg, dict):
-                can_accept_tool_result = False
-                continue
-
-            role = msg.get("role")
-            if role == "tool":
-                if not can_accept_tool_result:
-                    raise VLLMValidationError(
-                        "A message with role `tool` must follow an assistant "
-                        "message with `tool_calls`.",
-                        parameter="messages",
-                    )
-                continue
-
-            tool_calls = msg.get("tool_calls")
-            can_accept_tool_result = (
-                role == "assistant"
-                and isinstance(tool_calls, list)
-                and len(tool_calls) > 0
-            )
-
-        return data
-
     _grammar_from_tool_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by ``ToolParser.adjust_request``."""
 

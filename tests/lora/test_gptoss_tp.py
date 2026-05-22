@@ -40,6 +40,22 @@ EXPECTED_LORA_OUTPUT = [
     "SELECT max(Cows) ,  min(Cows) FROM farm",
 ]
 
+# Marlin is a CUDA backend. ROCm coverage should exercise the native MXFP4
+# backend selection instead of forcing a CUDA-only path.
+MXFP4_USE_MARLIN_PARAMS = [True, False] if current_platform.is_cuda() else [False]
+
+
+def _supports_gpt_oss_mxfp4_lora_tp() -> bool:
+    if current_platform.is_cuda():
+        return True
+    if not current_platform.is_rocm():
+        return False
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950() and rocm_aiter_ops.is_fused_moe_enabled()
+
 
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
@@ -80,7 +96,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         "Triton kernel spawn-safe or pre-warming the kernel cache."
     ),
 )
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize("mxfp4_use_marlin", MXFP4_USE_MARLIN_PARAMS)
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
     monkeypatch: pytest.MonkeyPatch,
@@ -109,8 +125,12 @@ def test_gpt_oss_lora(
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not _supports_gpt_oss_mxfp4_lora_tp(),
+    reason="GPT-OSS MXFP4 LoRA TP requires CUDA or ROCm gfx950 with AITER MoE.",
+)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize("mxfp4_use_marlin", MXFP4_USE_MARLIN_PARAMS)
 def test_gpt_oss_lora_tp2(
     monkeypatch: pytest.MonkeyPatch,
     gptoss20b_lora_files,

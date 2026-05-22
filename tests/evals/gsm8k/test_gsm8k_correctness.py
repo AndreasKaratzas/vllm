@@ -62,6 +62,15 @@ def test_gsm8k_correctness(config_filename):
             "Marlin kernels are not supported."
         )
 
+    if (
+        current_platform.is_rocm()
+        and "MXFP4" in eval_config["model_name"]
+        and not current_platform.supports_mx()
+    ):
+        pytest.skip(
+            "Skipping MXFP4 GSM8K configs on ROCm devices without MX support."
+        )
+
     # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
     if current_platform.is_rocm() and (
         "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
