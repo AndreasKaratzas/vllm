@@ -21,8 +21,13 @@
 #   MODEL_NAME          - target model (default: meta-llama/Llama-3.1-8B-Instruct)
 #   NUM_SPEC_TOKENS     - number of speculative tokens (default: 3)
 #   GPU_MEMORY_UTILIZATION - (default: 0.7)
+#   CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION
+#                       - gpu memory fraction for kv_buffer_device=cpu
+#                         (default: 0.2). Set to empty to use
+#                         GPU_MEMORY_UTILIZATION.
 #   ATTENTION_BACKEND   - attention backend to use
 #                         Default: TRITON_ATTN on ROCm, FLASH_ATTN on NVIDIA
+#                         Set to auto to let vLLM select the backend.
 #                         ROCm options: TRITON_ATTN, ROCM_ATTN, ROCM_AITER_FA,
 #                                       ROCM_AITER_UNIFIED_ATTN
 #                         NVIDIA options: FLASH_ATTN, FLASHINFER
@@ -53,7 +58,10 @@ NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
+CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION=${CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION-0.2}
 BLOCK_SIZE=${BLOCK_SIZE:-16}
+PREFILL_INTERNAL_PORT_BASE=${PREFILL_INTERNAL_PORT_BASE:-30000}
+DECODE_INTERNAL_PORT_BASE=${DECODE_INTERNAL_PORT_BASE:-31000}
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 NIXL_SIDE_CHANNEL_HOST="${NIXL_SIDE_CHANNEL_HOST:-$SERVER_HOST}"
 
@@ -67,12 +75,22 @@ SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 
 if [[ "$SMI_BIN" == *"rocm"* ]]; then
   GPU_PLATFORM="rocm"
-  GPU_DEVICE_VAR="HIP_VISIBLE_DEVICES"
 else
   GPU_PLATFORM="nvidia"
-  GPU_DEVICE_VAR="CUDA_VISIBLE_DEVICES"
 fi
-echo "Detected GPU platform: ${GPU_PLATFORM} (using ${GPU_DEVICE_VAR})"
+echo "Detected GPU platform: ${GPU_PLATFORM}"
+
+device_visibility_env() {
+  local gpu_ids="$1"
+  if [[ "$GPU_PLATFORM" == "rocm" ]]; then
+    # Do not set ROCR_VISIBLE_DEVICES together with HIP/CUDA here. ROCr
+    # applies its filter below the HIP runtime, so setting both to non-zero
+    # physical ids double-filters the device list and can hide the target GPUs.
+    echo "-u ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES=$gpu_ids CUDA_VISIBLE_DEVICES=$gpu_ids"
+  else
+    echo "CUDA_VISIBLE_DEVICES=$gpu_ids"
+  fi
+}
 
 # ── Attention backend config ─────────────────────────────────────────────
 
@@ -84,6 +102,13 @@ if [[ -z "${ATTENTION_BACKEND:-}" ]]; then
   fi
 fi
 echo "Using attention backend: ${ATTENTION_BACKEND}"
+ATTENTION_ARGS=()
+if [[ "${ATTENTION_BACKEND,,}" != "auto" ]]; then
+  ATTENTION_ARGS=(--attention-backend "$ATTENTION_BACKEND")
+fi
+
+SERVER_PIDS=()
+PROXY_PID=""
 
 # ── HMA & extra serve args ────────────────────────────────────────────
 
@@ -102,12 +127,29 @@ fi
 cleanup_instances() {
   echo ""
   echo "Cleaning up..."
-  kill $(jobs -pr) 2>/dev/null || true
+  local pids=()
+  if [[ -n "$PROXY_PID" ]]; then
+    pids+=("$PROXY_PID")
+  fi
+  if [[ ${#SERVER_PIDS[@]} -gt 0 ]]; then
+    pids+=("${SERVER_PIDS[@]}")
+  fi
+
+  for pid in "${pids[@]}"; do
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  done
   sleep 1
-  kill -9 $(jobs -pr) 2>/dev/null || true
+  for pid in "${pids[@]}"; do
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
   pkill -9 -f "vllm serve.*${MODEL_NAME}" 2>/dev/null || true
   pkill -9 -f "toy_proxy_server.*8192" 2>/dev/null || true
   sleep 1
+  SERVER_PIDS=()
+  PROXY_PID=""
   echo "Cleanup done."
 }
 trap cleanup_instances EXIT
@@ -226,6 +268,14 @@ run_test_for_device() {
   local DECODE_HOSTS=()
   local DECODE_PORTS=()
   local GPU_IDX=0
+  local CACHE_ARGS=()
+  if [[ "$kv_device" == "cpu" && -n "$CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION" ]]; then
+    CACHE_ARGS=(--gpu-memory-utilization "$CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION")
+    echo "GPU memory util:   ${CPU_KV_BUFFER_GPU_MEMORY_UTILIZATION}"
+  else
+    CACHE_ARGS=(--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION")
+    echo "GPU memory util:   ${GPU_MEMORY_UTILIZATION}"
+  fi
 
   # Start prefill instances and wait for each one before allocating the next
   # server. This keeps failures from leaving extra model servers spinning.
@@ -239,10 +289,14 @@ run_test_for_device() {
 
     local PORT=$((8100 + i))
     local SIDE_CHANNEL_PORT=$((5559 + i))
+    local INTERNAL_PORT_BASE=$((PREFILL_INTERNAL_PORT_BASE + i * 100))
+    local GPU_ENV
+    GPU_ENV="$(device_visibility_env "$GPU_ID")"
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
-    env \
-    ${GPU_DEVICE_VAR}=$GPU_ID \
+    setsid env \
+    $GPU_ENV \
+    VLLM_PORT=$INTERNAL_PORT_BASE \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
@@ -253,14 +307,15 @@ run_test_for_device() {
       --enforce-eager \
       --max-model-len $MAX_MODEL_LEN \
       --block-size ${BLOCK_SIZE} \
-      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      "${CACHE_ARGS[@]}" \
       --tensor-parallel-size $PREFILLER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND \
+      "${ATTENTION_ARGS[@]}" \
       ${ENABLE_HMA_VAR} \
       ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
+    SERVER_PIDS+=("$SERVER_PID")
 
     PREFILL_HOSTS+=("$SERVER_HOST")
     PREFILL_PORTS+=("$PORT")
@@ -279,10 +334,14 @@ run_test_for_device() {
 
     local PORT=$((8200 + i))
     local SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
+    local INTERNAL_PORT_BASE=$((DECODE_INTERNAL_PORT_BASE + i * 100))
+    local GPU_ENV
+    GPU_ENV="$(device_visibility_env "$GPU_ID")"
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
-    env \
-    ${GPU_DEVICE_VAR}=$GPU_ID \
+    setsid env \
+    $GPU_ENV \
+    VLLM_PORT=$INTERNAL_PORT_BASE \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
@@ -293,14 +352,15 @@ run_test_for_device() {
       --enforce-eager \
       --max-model-len $MAX_MODEL_LEN \
       --block-size ${BLOCK_SIZE} \
-      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      "${CACHE_ARGS[@]}" \
       --tensor-parallel-size $DECODER_TP_SIZE \
       --kv-transfer-config "$kv_config" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
-      --attention-backend $ATTENTION_BACKEND \
+      "${ATTENTION_ARGS[@]}" \
       ${ENABLE_HMA_VAR} \
       ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
+    SERVER_PIDS+=("$SERVER_PID")
 
     DECODE_HOSTS+=("$SERVER_HOST")
     DECODE_PORTS+=("$PORT")
@@ -311,13 +371,13 @@ run_test_for_device() {
   # Start proxy
   local PROXY_PORT=8192
   echo "Starting proxy server on port $PROXY_PORT..."
-  python3 "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
+  setsid python3 "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
     --port $PROXY_PORT \
     --prefiller-hosts ${PREFILL_HOSTS[*]} \
     --prefiller-ports ${PREFILL_PORTS[*]} \
     --decoder-hosts ${DECODE_HOSTS[*]} \
     --decoder-ports ${DECODE_PORTS[*]} &
-  local PROXY_PID=$!
+  PROXY_PID="$!"
 
   wait_for_server "$PROXY_PORT" "$PROXY_PID" "proxy" "/healthcheck" 60
 

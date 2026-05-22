@@ -167,6 +167,8 @@ def get_mt_bench_prompts(
         disable_shuffle=False,
         skip_chat_template=False,
         trust_remote_code=False,
+        enable_multimodal_chat=False,
+        request_id_prefix="",
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [
@@ -273,14 +275,14 @@ def test_eagle3_acceptance_length(
             actual_per_pos = results["acceptance_lengths_per_pos"]
             expected_per_pos = model_config.expected_acceptance_lengths_per_pos
 
-            rel_error = abs(actual_acceptance_length - expected) / expected
+            rel_error = max(0.0, expected - actual_acceptance_length) / expected
 
             # Overall acceptance length always uses DEFAULT_RTOL
             assert rel_error <= DEFAULT_RTOL, (
                 f"Acceptance length regression detected for {model_config.id}!\n"
                 f"  Expected: {expected:.3f}\n"
                 f"  Actual:   {actual_acceptance_length:.3f}\n"
-                f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
+                f"  Relative drop: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
                 f"  Drafts: {results['num_drafts']}, "
                 f"Accepted tokens: {results['num_accepted_tokens']}"
             )
@@ -294,20 +296,20 @@ def test_eagle3_acceptance_length(
                     zip(actual_per_pos, expected_per_pos)
                 ):
                     if exp > 0:
-                        pos_rel_error = abs(actual - exp) / exp
+                        pos_rel_error = max(0.0, exp - actual) / exp
                         assert pos_rel_error <= rtol, (
                             f"Per-position acceptance length regression at pos {pos} "
                             f"for {model_config.id}!\n"
                             f"  Expected: {exp:.3f}\n"
                             f"  Actual:   {actual:.3f}\n"
-                            f"  Relative error: {pos_rel_error:.2%} "
+                            f"  Relative drop: {pos_rel_error:.2%} "
                             f"(tolerance: {rtol:.2%})"
                         )
 
             print(
                 f"\n{model_config.id} [tp={tp_size}, backend={attention_backend}]: "
                 f"acceptance_length={actual_acceptance_length:.3f}"
-                f" (expected={expected:.3f}, rel_error={rel_error:.2%})"
+                f" (expected={expected:.3f}, rel_drop={rel_error:.2%})"
             )
             print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
             if expected_per_pos:

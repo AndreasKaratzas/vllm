@@ -1818,12 +1818,19 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 continue
 
             for item in tool_calls:
+                if not isinstance(item, dict):
+                    continue
+                function = item.get("function")
+                if function is None:
+                    # OpenAI's request schema also permits custom tool calls,
+                    # which do not have function arguments to normalize here.
+                    continue
                 # if arguments is None or empty string, set to {}
-                if content := item["function"].get("arguments"):
+                if content := function.get("arguments"):
                     if not isinstance(content, (dict, list)):
-                        item["function"]["arguments"] = json.loads(content)
+                        function["arguments"] = json.loads(content)
                 else:
-                    item["function"]["arguments"] = {}
+                    function["arguments"] = {}
 
 
 def parse_chat_messages(

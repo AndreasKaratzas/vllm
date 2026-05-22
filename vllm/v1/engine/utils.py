@@ -272,8 +272,18 @@ def set_device_control_env_var(
     evar = current_platform.device_control_env_var
 
     value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
-    with patch.dict(os.environ, values=((evar, value),)):
+    with patch.dict(os.environ, get_device_visibility_env_vars(value)):
         yield
+
+
+def get_device_visibility_env_vars(value: str) -> dict[str, str]:
+    env_vars = {current_platform.device_control_env_var: value}
+    if current_platform.is_rocm():
+        # RCCL/HIP may consult any of these visibility aliases. Keep them in
+        # sync so Ray DP workers do not form communicators on duplicate GPUs.
+        env_vars["HIP_VISIBLE_DEVICES"] = value
+        env_vars["ROCR_VISIBLE_DEVICES"] = value
+    return env_vars
 
 
 def get_device_indices(

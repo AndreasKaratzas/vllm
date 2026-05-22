@@ -7,7 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
@@ -146,6 +146,9 @@ def backend_to_kernel_cls(
             OAITritonExperts,
             OAITritonMxfp4ExpertsMonolithic,
         )
+
+        if current_platform.is_rocm():
+            return [OAITritonExperts]
 
         # NOTE: prefer Monolithic > Modular, so return Monolithic first.
         return [OAITritonMxfp4ExpertsMonolithic, OAITritonExperts]
@@ -327,7 +330,10 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    args = get_current_vllm_config().model_config.quantization_config
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    args = vllm_config.model_config.quantization_config
     if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
         return None
     return args.moe.activation
@@ -1479,7 +1485,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend in TRITON_BACKENDS:
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
-        if mxfp4_backend == Mxfp4MoeBackend.TRITON:
+        if (
+            mxfp4_backend == Mxfp4MoeBackend.TRITON
+            and not current_platform.is_rocm()
+        ):
 
             def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
                 shape = w.shape
@@ -1533,6 +1542,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
             f"Expected TRTLLM, Triton, or AITER backend."
         )
+
+
+convert_to_mxfp4_moe_kernel_format = convert_weight_to_mxfp4_moe_kernel_format
 
 
 def make_mxfp4_moe_quant_config(
@@ -1666,6 +1678,7 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    shared_experts: object | None = None,
     layer: "RoutedExperts | None" = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""

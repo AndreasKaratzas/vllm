@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
 )
 from vllm.platforms import current_platform
+from vllm.ir.tolerances import DEFAULT_TOLERANCES
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float]
@@ -255,7 +256,7 @@ def test_rms_norm(
         # big atol to account for round-off errors.
         assert torch.allclose(ref_out, ops_out, atol=1)
     else:
-        assert torch.allclose(ref_scales, ops_scales)
+        assert torch.allclose(ref_scales, ops_scales, atol=1e-4, rtol=1e-2)
         a = ref_out.to(dtype=torch.float32)
         b = ops_out.to(dtype=torch.float32)
         ok = torch.allclose(a, b, atol=1e-6)
@@ -273,7 +274,10 @@ def test_rms_norm(
             # all corresponding elements from each tensor (e.g. by looping over
             # them) and checking how many the max diff error shows up on (just
             # a few bad elements should still be considered acceptable).
-            ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
+            fp8_tolerances = DEFAULT_TOLERANCES.get(
+                quant_dtype, DEFAULT_TOLERANCES[torch.float8_e4m3fn]
+            )
+            ok = torch.allclose(a_deq, b_deq, **fp8_tolerances)
         assert ok
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual)

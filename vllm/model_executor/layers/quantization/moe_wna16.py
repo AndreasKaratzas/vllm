@@ -13,7 +13,6 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int4_w4a16_moe_quant_config,
@@ -367,10 +366,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        assert layer.activation == MoEActivation.SILU, (
-            f"Only SiLU activation is supported, not {layer.activation}."
-        )
-
         return fused_experts(
             x,
             layer.w13_qweight,
@@ -382,6 +377,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
+            activation=layer.activation,
         )
 
     @staticmethod

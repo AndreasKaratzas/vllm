@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -24,6 +25,7 @@ _SUPPORTED_BACKENDS = (
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
     "marlin": Fp8MoeBackend.MARLIN,
+    "triton": Fp8MoeBackend.TRITON,
     "xpu": Fp8MoeBackend.XPU,
 }
 
@@ -33,6 +35,13 @@ def _select_kernel_cls(
     config: FusedMoEConfig,
 ) -> type[mk.FusedMoEExperts]:
     """Select the first supported expert class for the MXFP8 config."""
+    if backend == Fp8MoeBackend.TRITON and current_platform.is_rocm():
+        from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+            Mxfp8QuantizationEmulationTritonExperts,
+        )
+
+        return Mxfp8QuantizationEmulationTritonExperts
+
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -86,6 +95,16 @@ def select_mxfp8_moe_backend(
         except ValueError:
             continue
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
+        return backend, experts_cls
+
+    if current_platform.is_rocm():
+        backend = Fp8MoeBackend.TRITON
+        experts_cls = _select_kernel_cls(backend, config)
+        logger.warning_once(
+            "No native MXFP8 MoE backend is available on ROCm. Falling back "
+            "to '%s' MXFP8 quantization emulation.",
+            backend.value,
+        )
         return backend, experts_cls
 
     raise ValueError("No MXFP8 MoE backends available.")

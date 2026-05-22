@@ -24,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExpert
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
@@ -167,6 +170,119 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         # Activation quantization/dequantization is deferred to
         # `moe_kernel_quantize_input` in TritonExperts.apply.
+        super().apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=w1_dequant,
+            w2=w2_dequant,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=expert_tokens_meta,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+
+
+class Mxfp8QuantizationEmulationTritonExperts(TritonExperts):
+    """
+    Triton BF16 MoE with MXFP8 quantize-dequantize emulation.
+
+    This is used when online MXFP8 is requested on platforms without a native
+    MXFP8 MoE kernel. We still quantize weights and activations to MXFP8, then
+    dequantize before the BF16 Triton expert matmuls.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        logger.warning_once(
+            "Using Mxfp8QuantizationEmulationTritonExperts MOE backend. This "
+            "will dequantize MXFP8 weights on the fly and may be slower than "
+            "native quantized MOE."
+        )
+
+        self.w1_scale_val = self.quant_config.w1_scale
+        self.w2_scale_val = self.quant_config.w2_scale
+        assert self.w1_scale_val is not None
+        assert self.w2_scale_val is not None
+
+        # TritonExperts.apply should see BF16 weights, while activations still
+        # pass through MXFP8 QDQ before each expert matmul.
+        self.quant_config._w1.scale = None
+        self.quant_config._w2.scale = None
+        self.quant_config._a1.dtype = "mxfp8"
+        self.quant_config._a2.dtype = "mxfp8"
+
+        self.quantization_emulation = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key,
+        activation_key,
+    ) -> bool:
+        # The MXFP8 oracle selects this emulation class directly.
+        return True
+
+    @property
+    def block_shape(self) -> list[int] | None:
+        # The native Triton BF16 matmuls do not need MXFP8 block tiling.
+        return None
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    def _dequantize_weights(
+        self,
+        w: torch.Tensor,
+        w_scale: torch.Tensor,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return dequant_mxfp8_to_bf16(w, w_scale).to(dtype)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        w1_dequant = self._dequantize_weights(
+            w1, self.w1_scale_val, hidden_states.dtype
+        )
+        w2_dequant = self._dequantize_weights(
+            w2, self.w2_scale_val, hidden_states.dtype
+        )
+
+        hidden_states, _ = moe_kernel_quantize_input(
+            A=hidden_states,
+            A_scale=None,
+            quant_dtype=self.quant_dtype,
+            per_act_token_quant=False,
+            block_shape=None,
+            quantization_emulation=True,
+        )
+
         super().apply(
             output=output,
             hidden_states=hidden_states,

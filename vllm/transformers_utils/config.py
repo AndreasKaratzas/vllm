@@ -188,6 +188,7 @@ class HFConfigParser(ConfigParserBase):
             code_revision=code_revision,
             **kwargs,
         )
+        patched_legacy_llama4_config = _maybe_patch_legacy_llama4_config(config_dict)
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type is None:
@@ -240,13 +241,19 @@ class HFConfigParser(ConfigParserBase):
                 trust_remote_code = False
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
-                config = AutoConfig.from_pretrained(
-                    model,
-                    trust_remote_code=trust_remote_code,
-                    revision=revision,
-                    code_revision=code_revision,
-                    **kwargs,
-                )
+                if patched_legacy_llama4_config:
+                    config_kwargs = dict(config_dict)
+                    config_model_type = config_kwargs.pop("model_type", model_type)
+                    config = AutoConfig.for_model(config_model_type, **config_kwargs)
+                    config.name_or_path = str(model)
+                else:
+                    config = AutoConfig.from_pretrained(
+                        model,
+                        trust_remote_code=trust_remote_code,
+                        revision=revision,
+                        code_revision=code_revision,
+                        **kwargs,
+                    )
             except ValueError as e:
                 if (
                     not trust_remote_code
@@ -574,6 +581,23 @@ def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
         kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
     return kwargs
+
+
+def _maybe_patch_legacy_llama4_config(config_dict: dict) -> bool:
+    """Patch older Llama4 configs rejected by strict Transformers dataclasses."""
+    if config_dict.get("model_type") != "llama4":
+        return False
+
+    text_config = config_dict.get("text_config")
+    if not isinstance(text_config, dict):
+        return False
+
+    value = text_config.get("attn_temperature_tuning")
+    if value is None or isinstance(value, bool):
+        return False
+
+    text_config["attn_temperature_tuning"] = bool(value)
+    return True
 
 
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:

@@ -57,7 +57,13 @@ def test_memory_profiling():
     # 5% tolerance is caused by cuda runtime.
     # we cannot control cuda runtime in the granularity of bytes,
     # which causes a small error (<10 MiB in practice)
-    non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024)  # noqa
+    setup_non_torch_increase = (
+        result.before_profile.non_torch_memory - baseline_snapshot.non_torch_memory
+    )
+    expected_non_torch_increase = (
+        256 * 1024 * 1024 + max(0, setup_non_torch_increase)
+    )
+    non_torch_ratio = result.non_torch_increase / expected_non_torch_increase
     assert abs(non_torch_ratio - 1) <= 0.05
     assert result.torch_peak_increase == 1024 * 1024 * 1024
     del weights

@@ -6,6 +6,7 @@ import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
+from vllm.ir.tolerances import DEFAULT_TOLERANCES
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -156,11 +157,13 @@ def test_fused_rms_norm_quant(
             (out_quant_fused, x, weight, quant_scale_t, 1e-6),
         )
 
+    fp8_tolerances = DEFAULT_TOLERANCES.get(
+        FP8_DTYPE, DEFAULT_TOLERANCES[torch.float8_e4m3fn]
+    )
     torch.testing.assert_close(
-        out_quant.to(dtype=torch.float32),
-        out_quant_fused.to(dtype=torch.float32),
-        atol=1e-3,
-        rtol=1e-3,
+        out_quant.to(dtype=torch.float32) * quant_scale_t,
+        out_quant_fused.to(dtype=torch.float32) * quant_scale_t,
+        **fp8_tolerances,
     )
 
 

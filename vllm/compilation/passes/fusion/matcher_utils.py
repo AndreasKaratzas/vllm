@@ -12,6 +12,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -44,6 +45,13 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+elif current_platform.is_rocm() and not current_platform.is_fp8_fnuz():
+    QUANT_OPS[kFp8Dynamic128Sym] = (
+        torch.ops.vllm.triton_per_token_group_quant_fp8.default
+    )
+    QUANT_OPS[kFp8Dynamic64Sym] = (
+        torch.ops.vllm.triton_per_token_group_quant_fp8.default
+    )
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 

@@ -20,6 +20,7 @@ from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_open_port,
 )
+from vllm.v1.engine.utils import get_device_visibility_env_vars
 from vllm.v1.executor.multiproc_executor import (
     FutureWrapper,
     MultiprocExecutor,
@@ -43,6 +44,16 @@ else:
     ActorHandle = None
 
 logger = init_logger(__name__)
+
+
+def _ray_gpu_ids_to_visible_devices(gpu_ids: list[int]) -> str:
+    device_ids: list[int] = []
+    for gpu_id in gpu_ids:
+        try:
+            device_ids.append(current_platform.device_id_to_physical_device_id(gpu_id))
+        except IndexError:
+            device_ids.append(gpu_id)
+    return ",".join(map(str, device_ids))
 
 
 @dataclass
@@ -228,7 +239,13 @@ class RayExecutorV2(MultiprocExecutor):
         runtime_env: dict = copy.deepcopy(dict(base)) if base else {}
 
         env_vars = runtime_env.setdefault("env_vars", {})
-        env_vars.update({v: "1" for v in current_platform.ray_noset_device_env_vars})
+        noset_device_env_vars = current_platform.ray_noset_device_env_vars
+        if current_platform.is_rocm():
+            # Let Ray set ROCm visibility before the actor imports vLLM. RCCL
+            # can otherwise see the parent process's device set and reject
+            # cross-DP communicators as duplicate-GPU groups.
+            noset_device_env_vars = []
+        env_vars.update({v: "1" for v in noset_device_env_vars})
         if self.parallel_config.ray_workers_use_nsight:
             runtime_env["nsight"] = {
                 "t": "cuda,cudnn,cublas",
@@ -382,13 +399,21 @@ class RayExecutorV2(MultiprocExecutor):
         # CUDA_VISIBLE_DEVICES. Each worker sees all GPUs assigned to
         # this executor on its node; local_rank indexes into that set.
         init_worker_refs = []
-        for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
-            local_rank = node_workers[node_id].index(i)
-            worker_env_vars = {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
+        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+            if current_platform.is_rocm():
+                # Ray sets HIP_VISIBLE_DEVICES per ROCm actor. Keep each actor
+                # on its assigned visible device and use index 0 inside that
+                # actor; otherwise single-GPU actors can be asked to open
+                # cuda:1/cuda:2 after visibility remapping.
+                local_rank = 0
+                worker_env_vars = get_device_visibility_env_vars(
+                    _ray_gpu_ids_to_visible_devices(gpu_ids)
+                )
+            else:
+                local_rank = node_workers[node_id].index(i)
+                worker_env_vars = get_device_visibility_env_vars(
+                    _ray_gpu_ids_to_visible_devices(node_gpus[node_id])
+                )
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
                 self.ray_worker_handles[i].actor.initialize_worker.remote(

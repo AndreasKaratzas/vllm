@@ -336,6 +336,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         trust_remote_code=True,
+        max_transformers_version="5.8.0",
+        transformers_version_reason={
+            "hf": (
+                "HyperCLOVAX remote HF code is incompatible with Transformers "
+                "5.9: its rotary embedding setup expects a removed "
+                "ROPE_INIT_FUNCTIONS['default'] entry."
+            ),
+        },
     ),
     "InternLMForCausalLM": _HfExamplesInfo(
         "internlm/internlm-chat-7b", trust_remote_code=True
@@ -419,7 +427,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
     "MiniCPM4ForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM4.1-8B", trust_remote_code=True
+        "openbmb/MiniCPM4.1-8B",
+        trust_remote_code=True,
+        max_transformers_version="5.8.0",
+        transformers_version_reason={
+            "hf": (
+                "MiniCPM4.1 remote HF code is incompatible with Transformers "
+                "5.9: it imports removed utilities and its generation path no "
+                "longer provides a valid HF reference."
+            ),
+        },
     ),
     "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(

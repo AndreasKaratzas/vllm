@@ -48,6 +48,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def prefer_cross_layer_blocks(self) -> bool:
         return True
 
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,

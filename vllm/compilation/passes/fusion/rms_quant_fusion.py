@@ -10,6 +10,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
 import vllm.ir.ops
+import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -81,6 +82,13 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+elif current_platform.is_rocm() and not current_platform.is_fp8_fnuz():
+    QUANT_OPS[kFp8Dynamic128Sym] = (
+        torch.ops.vllm.triton_per_token_group_quant_fp8.default
+    )
+    QUANT_OPS[kFp8Dynamic64Sym] = (
+        torch.ops.vllm.triton_per_token_group_quant_fp8.default
+    )
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -480,6 +488,140 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         )
 
 
+class FusedAddRMSNormTritonGroupQuantPattern(RMSNormQuantPattern):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        symmetric: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=True,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self.group_shape = group_shape
+        super().__init__(epsilon, key)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms, residual = vllm.ir.ops.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
+            result, scale = torch.ops.vllm.triton_per_token_group_quant_fp8(
+                result_rms, self.group_shape[1]
+            )
+            return result, residual, scale
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            input = input.to(dtype=self.model_dtype)
+
+            result = torch.empty_like(input, dtype=self.quant_dtype)
+            scale = self.quant_matcher.make_scale(input)
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=residual,
+                group_size=self.group_shape[1],
+                is_scale_transposed=False,
+            )
+
+            # result, residual, scale
+            return at[1], at[3], at[2]
+
+        inputs = [
+            empty_bf16(5, 16),
+            empty_bf16(16),
+            empty_bf16(5, 16),
+        ]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
+        )
+
+
+class RMSNormTritonGroupQuantPattern(RMSNormQuantPattern):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        symmetric: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self.group_shape = group_shape
+        super().__init__(epsilon, key)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result_rms = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
+            return torch.ops.vllm.triton_per_token_group_quant_fp8(
+                result_rms, self.group_shape[1]
+            )
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            input = input.to(dtype=self.model_dtype)
+
+            result = torch.empty_like(input, dtype=self.quant_dtype)
+            scale = self.quant_matcher.make_scale(input)
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=None,
+                group_size=self.group_shape[1],
+                is_scale_transposed=False,
+            )
+
+            # result, scale
+            return at[1], at[2]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            [
+                empty_bf16(5, 16),
+                empty_bf16(16),
+            ],
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
+        )
+
+
 class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def __init__(
         self,
@@ -637,7 +779,17 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             # Fuse rms_norm + dynamic per-token fp8 quant
             RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
-            # Only register group quant patterns on CUDA where the C++ op exists
+            if current_platform.is_rocm() and not current_platform.is_fp8_fnuz():
+                for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                    FusedAddRMSNormTritonGroupQuantPattern(
+                        epsilon, FP8_DTYPE, group_shape=group_shape
+                    ).register(self.patterns)
+                    RMSNormTritonGroupQuantPattern(
+                        epsilon, FP8_DTYPE, group_shape=group_shape
+                    ).register(self.patterns)
+
+            # Only register custom group quant patterns on CUDA where the C++
+            # quant op exists.
             if current_platform.is_cuda():
                 for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
                     for has_col_major_scales in [True, False]:
@@ -680,4 +832,6 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
             FusedAddRMSNormGroupQuantPattern,
+            FusedAddRMSNormTritonGroupQuantPattern,
+            RMSNormTritonGroupQuantPattern,
         )

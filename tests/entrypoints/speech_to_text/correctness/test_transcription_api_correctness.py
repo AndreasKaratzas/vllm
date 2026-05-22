@@ -16,7 +16,7 @@ from statistics import mean, median
 import pytest
 import soundfile
 import torch
-from datasets import load_dataset
+from datasets import Audio, load_dataset
 from evaluate import load
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
@@ -89,12 +89,12 @@ async def process_dataset(model, client, data, concurrent_request):
     )
 
     # Warmup call as the first `load_audio` server-side is quite slow.
-    audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
+    audio, sr = load_audio(data[0])
     _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "")
 
     tasks: list[asyncio.Task] = []
     for sample in data:
-        audio, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
+        audio, sr = load_audio(sample)
         task = asyncio.create_task(
             bound_transcribe(sem, client, tokenizer, (audio, sr), sample["text"])
         )
@@ -120,8 +120,21 @@ def print_performance_metrics(results, total_time):
     print(f"Estimated Throughput: {throughput:.2f} tok/s")
 
 
+def load_audio(sample):
+    audio = sample["audio"]
+    if "array" in audio:
+        return audio["array"], audio["sampling_rate"]
+
+    if audio["bytes"] is not None:
+        source = io.BytesIO(audio["bytes"])
+    else:
+        source = audio["path"]
+    y, sr = soundfile.read(source, dtype="float32")
+    return y, sr
+
+
 def add_duration(sample):
-    y, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
+    y, sr = load_audio(sample)
     sample["duration_ms"] = get_audio_duration(y=y, sr=sr) * 1000
     return sample
 
@@ -129,6 +142,7 @@ def add_duration(sample):
 def load_hf_dataset(dataset_repo: str, split="validation", **hf_kwargs):
     ## Load and filter the dataset
     dataset = load_dataset(dataset_repo, split=split, **hf_kwargs)
+    dataset = dataset.cast_column("audio", Audio(decode=False))
     if "duration_ms" not in dataset[0]:
         # compute duration to filter
         dataset = dataset.map(add_duration)

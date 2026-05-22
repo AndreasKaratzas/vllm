@@ -34,6 +34,10 @@ FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
 
 
+def _has_cutlass_scaled_mm() -> bool:
+    return hasattr(torch.ops._C, "cutlass_scaled_mm")
+
+
 def _flashinfer_scaled_mm_out(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -918,12 +922,13 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                 self.pm_pass
             )
 
-            CutlassScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
-                self.pm_pass
-            )
-            AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
-                self.pm_pass
-            )
+            if _has_cutlass_scaled_mm():
+                CutlassScaledMMReduceScatterPattern(
+                    self.model_dtype, self.device
+                ).register(self.pm_pass)
+                AllGatherCutlassScaledMMPattern(
+                    self.model_dtype, self.device
+                ).register(self.pm_pass)
             with suppress(ImportError):
                 import vllm.utils.flashinfer  # noqa: F401
             if hasattr(torch.ops.vllm, "bmm_fp8"):

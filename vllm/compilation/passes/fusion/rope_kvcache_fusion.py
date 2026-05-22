@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerNameType,
@@ -253,6 +254,12 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         for _, layer in attn_layers.items():
             if layer.impl.fused_rope_kvcache_supported():
                 for is_neox in [True, False]:
+                    if (
+                        current_platform.is_rocm()
+                        and config.cache_config.cache_dtype.startswith("fp8")
+                        and not is_neox
+                    ):
+                        continue
                     RopeReshapeKVCachePattern(
                         layer=layer,
                         is_neox=is_neox,

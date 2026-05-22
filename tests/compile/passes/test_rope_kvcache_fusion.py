@@ -219,6 +219,11 @@ def test_rope_kvcache_fusion(
     kv_cache_dtype: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    if current_platform.is_rocm() and kv_cache_dtype == "fp8" and not is_neox:
+        pytest.skip(
+            "ROCm fused RoPE+KV cache update is disabled for non-NeoX FP8 KV cache."
+        )
+
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)

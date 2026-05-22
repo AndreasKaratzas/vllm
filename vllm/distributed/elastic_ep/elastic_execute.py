@@ -15,6 +15,7 @@ from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import (
     CompilationMode,
+    CUDAGraphMode,
     set_current_vllm_config,
 )
 from vllm.distributed import (
@@ -46,6 +47,15 @@ from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 logger = init_logger(__name__)
 
 
+_MOE_TOPOLOGY_STATE_SUFFIXES = (
+    "expert_map",
+    "expert_mask",
+    "expert_global_to_physical",
+    "expert_physical_to_global",
+    "expert_local_to_global",
+)
+
+
 def batch_transfer_weights(
     model: nn.Module,
     is_sender: bool,
@@ -66,7 +76,7 @@ def batch_transfer_weights(
     all_params = []
 
     for name, param in state_dict.items():
-        if name.endswith("expert_map"):
+        if name.endswith(_MOE_TOPOLOGY_STATE_SUFFIXES):
             continue
         if param.data_ptr() not in expert_weights_set:
             all_params.append(param.data)
@@ -484,6 +494,19 @@ class ElasticEPScalingExecutor:
         self._perform_eplb_reshuffle()
         self._set_eplb_suppressed(False)
 
+    def finish_scale_up(self) -> None:
+        eplb_state = self.worker.model_runner.eplb_state
+        assert eplb_state is not None
+        for eplb_model_state in eplb_state.model_states.values():
+            eplb_model_state.expert_load_pass.zero_()
+            eplb_model_state.expert_load_window.zero_()
+            valid_columns = (eplb_model_state.physical_to_logical_map[0] >= 0).sum()
+            eplb_state.num_valid_physical_experts = int(valid_columns.item())
+        eplb_state.expert_load_window_step = 0
+        eplb_state.expert_rearrangement_step = 0
+        self._set_eplb_suppressed(False)
+        self.rewarm_workspace()
+
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
         self._set_eplb_suppressed(True)
         parallel_config = self.worker.vllm_config.parallel_config
@@ -545,12 +568,11 @@ class ElasticEPScalingExecutor:
                 device=self.worker.device,
             )
         )
-        num_moe_layers = physical_to_logical.shape[0]
         new_dp_size = get_dp_group().world_size
         tp_size = self.worker.vllm_config.parallel_config.tensor_parallel_size
         new_ep_size = new_dp_size * tp_size
         expanded_physical_to_logical = torch.full(
-            (num_moe_layers, num_local_physical_experts * new_ep_size),
+            (physical_to_logical.shape[0], num_local_physical_experts * new_ep_size),
             -1,
             dtype=physical_to_logical.dtype,
             device=physical_to_logical.device,
@@ -599,6 +621,14 @@ class ElasticEPScalingExecutor:
         # convention compile_or_warm_up_model itself uses.
         runner = self.worker.model_runner
         runner._dummy_run(runner.max_num_tokens, is_profile=True, skip_eplb=True)
+        compilation_config = self.worker.vllm_config.compilation_config
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            logger.info(
+                "[Elastic EP] Disabling CUDAGraph replay after topology change"
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            runner.cudagraph_dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
+            runner.cudagraph_batch_sizes = []
         self.worker.compile_or_warm_up_model()
 
         lock_workspace()

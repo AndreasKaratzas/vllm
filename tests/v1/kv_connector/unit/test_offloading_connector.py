@@ -136,7 +136,6 @@ def _wait_for_prefix_cache_reset(llm: LLM) -> None:
 def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     sampling_params = SamplingParams(max_tokens=1)
 
-    num_times_cpu_better_than_cold = 0
     num_tests = 10
     total_cold_time = 0.0
     total_gpu_hit_time = 0.0
@@ -145,6 +144,13 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     # Use a long prompt that fits within the model's context window.
     prompt_len = min(10001, max_model_len - 1)
     prompt_token_ids = [0] * prompt_len
+    extra_config = (
+        llm.llm_engine.vllm_config.kv_transfer_config.kv_connector_extra_config
+    )
+    cpu_block_size = extra_config.get("block_size")
+    if cpu_block_size is None:
+        cpu_block_size = llm.llm_engine.vllm_config.cache_config.block_size
+    min_expected_cpu_cached_tokens = (prompt_len // cpu_block_size) * cpu_block_size
     for i in tqdm(range(num_tests), desc="Running tests"):
         prompt_token_ids[0] = i
         prompts = [TokensPrompt(prompt_token_ids=prompt_token_ids)]
@@ -157,9 +163,10 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
 
         # run generation again - should hit the GPU prefix cache
         start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
+        gpu_outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
         gpu_hit_time = time.time() - start_time
         total_gpu_hit_time += gpu_hit_time
+        assert (gpu_outputs[0].num_cached_tokens or 0) > 0
 
         # Wait for the async CPU offload to finish, then reset prefix cache
         # so the next generate() must reload from CPU rather than GPU.
@@ -175,19 +182,17 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
 
         # run generation again - this should trigger loading from CPU
         start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
+        cpu_outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
         cpu_hit_time = time.time() - start_time
         total_cpu_hit_time += cpu_hit_time
-
-        if cpu_hit_time < cold_time:
-            num_times_cpu_better_than_cold += 1
+        assert (
+            cpu_outputs[0].num_cached_tokens or 0
+        ) >= min_expected_cpu_cached_tokens
 
     print("Average times:")
     print(f"    Cold: {total_cold_time * 1000 / num_tests:.2f}ms")
     print(f"    GPU hit: {total_gpu_hit_time * 1000 / num_tests:.2f}ms")
     print(f"    CPU hit: {total_cpu_hit_time * 1000 / num_tests:.2f}ms")
-
-    assert num_times_cpu_better_than_cold >= 0.8 * num_tests
 
 
 def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):

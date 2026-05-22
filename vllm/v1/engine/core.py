@@ -70,6 +70,7 @@ from vllm.v1.engine.utils import (
     EngineZmqAddresses,
     SignalCallback,
     get_device_indices,
+    get_device_visibility_env_vars,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
@@ -2077,7 +2078,7 @@ class EngineCoreActorMixin:
             value = get_device_indices(
                 device_control_env_var, local_dp_rank, world_size
             )
-            os.environ[device_control_env_var] = value
+            os.environ.update(get_device_visibility_env_vars(value))
         except IndexError as e:
             raise Exception(
                 f"Error setting {device_control_env_var}: "

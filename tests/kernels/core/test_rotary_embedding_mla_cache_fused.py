@@ -16,7 +16,6 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16, torch.float])
 @pytest.mark.parametrize("is_neox_style", [False, True])
 @pytest.mark.parametrize("seq_len", [11, 42])
@@ -165,7 +164,12 @@ def test_concat_and_cache_mla_rope_fused(
         )
         torch.testing.assert_close(result_temp, expected_temp, atol=0.001, rtol=0.1)
     else:
-        torch.testing.assert_close(kv_cache, ref_kv_cache)
+        torch.testing.assert_close(
+            kv_cache,
+            ref_kv_cache,
+            atol=get_default_atol(kv_cache),
+            rtol=get_default_rtol(kv_cache),
+        )
 
     torch.testing.assert_close(
         query, ref_q_pe, atol=get_default_atol(query), rtol=get_default_rtol(query)

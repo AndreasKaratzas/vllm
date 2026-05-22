@@ -43,9 +43,12 @@ if ROCM_AVAILABLE:
     ROCM_GFX950 = on_gfx950()
     ROCM_AITER_AVAILABLE = rocm_aiter_ops.is_enabled()
 
-    if ROCM_AITER_AVAILABLE:
+    try:
         from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    except (ImportError, RuntimeError):
+        dynamic_mxfp4_quant = None
+        upcast_from_mxfp = None
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (
@@ -90,6 +93,13 @@ def enable_pickle(monkeypatch):
 )
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
+    if (
+        ROCM_AVAILABLE
+        and not (ROCM_GFX950 and ROCM_AITER_AVAILABLE)
+        and "Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4" in model_case.model_id
+    ):
+        pytest.skip("Llama4 W4A4 MXFP4 MoE requires native GFX950 AITER MoE")
+
     if torch.accelerator.device_count() < model_case.tp:
         pytest.skip(
             f"This test requires >={model_case.tp} gpus, got only "
@@ -1281,6 +1291,10 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
+    if dynamic_mxfp4_quant is None:
+        pytest.skip("dynamic_mxfp4_quant is required to create test weights")
+    if upcast_from_mxfp is None:
+        pytest.skip("upcast_from_mxfp is required to validate test weights")
 
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation

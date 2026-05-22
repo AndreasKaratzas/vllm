@@ -59,8 +59,8 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
 
     // NOTE: Would be nice to have interleaved sin/cos so we could just load
     // both at the same time.
-    qk_t cos = static_cast<qk_t>(VLLM_LDG(cos_sin_ptr + pair_idx));
-    qk_t sin = static_cast<qk_t>(VLLM_LDG(cos_sin_ptr + pair_idx + embed_dim));
+    float cos = static_cast<float>(VLLM_LDG(cos_sin_ptr + pair_idx));
+    float sin = static_cast<float>(VLLM_LDG(cos_sin_ptr + pair_idx + embed_dim));
 
     qk_t* q_pe_head_ptr =
         q_pe + token_idx * q_pe_stride_token + head_idx * q_pe_stride_head;
@@ -76,11 +76,11 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
       pair_idx_y = pair_idx * 2 + 1;
     }
 
-    qk_t x_src = q_pe_head_ptr[pair_idx_x];
-    qk_t y_src = q_pe_head_ptr[pair_idx_y];
+    float x_src = static_cast<float>(q_pe_head_ptr[pair_idx_x]);
+    float y_src = static_cast<float>(q_pe_head_ptr[pair_idx_y]);
 
-    qk_t x_dst = x_src * cos - y_src * sin;
-    qk_t y_dst = y_src * cos + x_src * sin;
+    qk_t x_dst = static_cast<qk_t>(x_src * cos - y_src * sin);
+    qk_t y_dst = static_cast<qk_t>(y_src * cos + x_src * sin);
 
     q_pe_head_ptr[pair_idx_x] = x_dst;
     q_pe_head_ptr[pair_idx_y] = y_dst;
@@ -93,8 +93,8 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
   for (int i = threadIdx.x; i < embed_dim; i += blockDim.x) {
     int pair_idx = i;
 
-    qk_t cos = static_cast<qk_t>(VLLM_LDG(cos_sin_ptr + pair_idx));
-    qk_t sin = static_cast<qk_t>(VLLM_LDG(cos_sin_ptr + pair_idx + embed_dim));
+    float cos = static_cast<float>(VLLM_LDG(cos_sin_ptr + pair_idx));
+    float sin = static_cast<float>(VLLM_LDG(cos_sin_ptr + pair_idx + embed_dim));
 
     qk_t* k_pe_head_ptr = k_pe + token_idx * k_pe_stride;
 
@@ -109,11 +109,11 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
       pair_idx_y = pair_idx * 2 + 1;
     }
 
-    qk_t x_src = k_pe_head_ptr[pair_idx_x];
-    qk_t y_src = k_pe_head_ptr[pair_idx_y];
+    float x_src = static_cast<float>(k_pe_head_ptr[pair_idx_x]);
+    float y_src = static_cast<float>(k_pe_head_ptr[pair_idx_y]);
 
-    qk_t x_dst = x_src * cos - y_src * sin;
-    qk_t y_dst = y_src * cos + x_src * sin;
+    qk_t x_dst = static_cast<qk_t>(x_src * cos - y_src * sin);
+    qk_t y_dst = static_cast<qk_t>(y_src * cos + x_src * sin);
 
     k_pe_head_ptr[pair_idx_x] = x_dst;
     k_pe_head_ptr[pair_idx_y] = y_dst;
