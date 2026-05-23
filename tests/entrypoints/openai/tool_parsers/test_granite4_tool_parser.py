@@ -151,6 +151,20 @@ messages = [
         "role": "user",
     },
     {
+        "content": None,
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "time_range_tool",
+                "type": "function",
+                "function": {
+                    "name": "get_time_range",
+                    "arguments": "{}",
+                },
+            }
+        ],
+    },
+    {
         "content": '["2026-01-26T09: 51: 55.467722Z", "2026-01-27T09: 51: 55.467722Z"]',
         "role": "tool",
         "tool_call_id": "time_range_tool",

@@ -14,6 +14,7 @@ from .protocol import TokenizerLike
 
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 _T = TypeVar("_T", bound=TokenizerLike)
+_BACKEND_TOKENIZER_ERROR = "Couldn't instantiate the backend tokenizer"
 
 
 class ThreadSafeHFTokenizerMixin:
@@ -101,6 +102,50 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     tokenizer.__class__ = TokenizerPool
 
 
+def _tokenizer_from_explicit_class(
+    path_or_repo_id: str | Path,
+    *args,
+    trust_remote_code: bool,
+    revision: str | None,
+    download_dir: str | None,
+    **kwargs,
+) -> HfTokenizer:
+    from transformers.models.auto.tokenization_auto import (
+        get_tokenizer_config,
+        tokenizer_class_from_name,
+    )
+
+    tokenizer_config = get_tokenizer_config(
+        path_or_repo_id,
+        revision=revision,
+        cache_dir=download_dir,
+        **kwargs,
+    )
+    tokenizer_class_name = tokenizer_config.get("tokenizer_class")
+    if tokenizer_class_name in (
+        None,
+        "PythonBackend",
+        "TokenizersBackend",
+        "PreTrainedTokenizerFast",
+    ):
+        raise ValueError("No explicit tokenizer class found.")
+
+    tokenizer_class = tokenizer_class_from_name(tokenizer_class_name)
+    if tokenizer_class is None and not tokenizer_class_name.endswith("Fast"):
+        tokenizer_class = tokenizer_class_from_name(tokenizer_class_name + "Fast")
+    if tokenizer_class is None:
+        raise ValueError(f"Tokenizer class {tokenizer_class_name!r} was not found.")
+
+    return tokenizer_class.from_pretrained(
+        path_or_repo_id,
+        *args,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
+        cache_dir=download_dir,
+        **kwargs,
+    )
+
+
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """
     By default, transformers will recompute multiple tokenizer properties
@@ -178,6 +223,22 @@ class CachedHfTokenizer(TokenizerLike):
                 **kwargs,
             )
         except ValueError as e:
+            fallback_error: Exception | None = None
+            if _BACKEND_TOKENIZER_ERROR in str(e):
+                try:
+                    tokenizer = _tokenizer_from_explicit_class(
+                        path_or_repo_id,
+                        *args,
+                        trust_remote_code=trust_remote_code,
+                        revision=revision,
+                        download_dir=download_dir,
+                        **kwargs,
+                    )
+                except Exception as err:
+                    fallback_error = err
+                else:
+                    return get_cached_tokenizer(tokenizer)
+
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,
             # suggest using the --trust-remote-code flag.
@@ -196,6 +257,8 @@ class CachedHfTokenizer(TokenizerLike):
                     "`uv pip install --upgrade transformers`"
                 )
                 raise RuntimeError(err_msg) from e
+            elif fallback_error is not None:
+                raise e from fallback_error
             else:
                 raise e
 

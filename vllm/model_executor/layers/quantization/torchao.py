@@ -91,12 +91,15 @@ def should_skip(prefix: str, skip_modules: list[str]) -> bool:
     return False
 
 
-if torchao_version_at_least("0.15.0"):
+def _convert_to_packed_tensor_based_on_current_hardware(t: torch.Tensor) -> torch.Tensor:
+    if not torchao_version_at_least("0.15.0"):
+        return t
+
     from torchao.prototype.tensor_conversion.api import (
         convert_to_packed_tensor_based_on_current_hardware,
     )
-else:
-    convert_to_packed_tensor_based_on_current_hardware = lambda t: t
+
+    return convert_to_packed_tensor_based_on_current_hardware(t)
 
 
 def _check_torchao_fp8_activation_capability(torchao_config) -> None:
@@ -376,7 +379,7 @@ class TorchAOLinearMethod(LinearMethodBase):
             recorded_weight_attr = _get_weight_attrs(layer.weight)
 
             layer.weight = Parameter(
-                convert_to_packed_tensor_based_on_current_hardware(layer.weight),
+                _convert_to_packed_tensor_based_on_current_hardware(layer.weight),
                 requires_grad=layer.weight.requires_grad,
             )
 
@@ -391,7 +394,7 @@ class TorchAOLinearMethod(LinearMethodBase):
             layer.weight, self.quant_config.torchao_config
         )
         weight = torch.nn.Parameter(
-            convert_to_packed_tensor_based_on_current_hardware(weight),
+            _convert_to_packed_tensor_based_on_current_hardware(weight),
             weight.requires_grad,
         )
 

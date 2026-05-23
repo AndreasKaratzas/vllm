@@ -3,14 +3,18 @@
 
 from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 from packaging.version import Version
-from transformers import PretrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
+from transformers.configuration_utils import PretrainedConfig
 
-from vllm.config.model import ModelDType, TokenizerMode
+if TYPE_CHECKING:
+    from vllm.config.model import ModelDType, TokenizerMode
+else:
+    ModelDType = str
+    TokenizerMode = str
 
 
 @dataclass(frozen=True)
@@ -851,7 +855,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Salesforce/blip2-opt-2.7b",
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
     ),
-    "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),
+    "ChameleonForConditionalGeneration": _HfExamplesInfo(
+        "facebook/chameleon-7b",
+        is_available_online=False,
+    ),
     "Cheers": _HfExamplesInfo(
         "ai9stars/Cheers",
         trust_remote_code=True,
@@ -880,6 +887,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Eagle2_5_VLForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Eagle2.5-8B",
+        is_available_online=False,
         trust_remote_code=True,
     ),
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
@@ -1384,7 +1392,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
     ),
-    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),
+    "TarsierForConditionalGeneration": _HfExamplesInfo(
+        "omni-research/Tarsier-7b",
+        is_available_online=False,
+    ),
     "Tarsier2ForConditionalGeneration": _HfExamplesInfo(
         "omni-research/Tarsier2-Recap-7b",
         hf_overrides={

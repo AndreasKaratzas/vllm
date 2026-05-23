@@ -21,14 +21,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
-import transformers
 
 from vllm import envs
-from vllm.config import (
-    ModelConfig,
-    iter_architecture_defaults,
-    try_match_architecture_defaults,
-)
 from vllm.logger import init_logger
 from vllm.logging_utils import logtime
 from vllm.tasks import ScoreType
@@ -36,9 +30,11 @@ from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_mo
 from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.config.model import AttnTypeStr
     from vllm.config.pooler import SequencePoolingType, TokenPoolingType
 else:
+    ModelConfig = Any
     AttnTypeStr = Any
     SequencePoolingType = Any
     TokenPoolingType = Any
@@ -1055,6 +1051,8 @@ class _ModelRegistry:
         architecture: str,
         model_config: ModelConfig,
     ) -> str | None:
+        import transformers
+
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
 
@@ -1125,6 +1123,11 @@ class _ModelRegistry:
         architecture: str,
         model_config: ModelConfig,
     ) -> str:
+        from vllm.config.model import (
+            iter_architecture_defaults,
+            try_match_architecture_defaults,
+        )
+
         if architecture in self.models:
             return architecture
 

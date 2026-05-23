@@ -9,14 +9,8 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
-from vllm.transformers_utils.config import (
-    try_get_dense_modules,
-)
-from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
 from .interfaces import supports_multimodal
 from .interfaces_base import VllmModelForPooling, is_pooling_model
@@ -39,6 +33,8 @@ _GENERATE_SUFFIXES = [
 
 def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
     """Load Sentence-Transformers Dense projection layers."""
+    from vllm.model_executor.layers.activation import get_act_fn
+    from vllm.transformers_utils.config import try_get_dense_modules
 
     dense_modules = try_get_dense_modules(
         model_config.model, revision=model_config.revision
@@ -74,6 +70,7 @@ def _load_dense_weights(
 ) -> bool:
     """Load weights using vLLM's weight_loader pattern."""
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+    from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
     for filename in ["model.safetensors", "pytorch_model.bin"]:
         file_path = f"{folder}/{filename}" if folder else filename

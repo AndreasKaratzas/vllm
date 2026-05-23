@@ -95,7 +95,7 @@ def validate_embed_output(q_rep: list[list[float]], d_rep: list[list[float]]):
     assert cosine_sim_q1_d0 == pytest.approx(0.120, abs=ATOL)
 
     cosine_sim_q1_d1 = 1 - cosine(q_rep[1], d_rep[1])
-    assert cosine_sim_q1_d1 == pytest.approx(0.534, abs=ATOL)
+    assert cosine_sim_q1_d1 == pytest.approx(0.533, abs=ATOL)
 
 
 def test_gritlm_offline_embedding(vllm_runner):

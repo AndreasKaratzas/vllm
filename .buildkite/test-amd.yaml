@@ -2413,38 +2413,71 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - HYBRID_SSM=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: V1 e2e (4 GPUs) %N # TBD
+- label: V1 e2e (4 GPUs) - Part 1 # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
   optional: true
-  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1/e2e
   commands:
-    - |
-      case "$$BUILDKITE_PARALLEL_JOB" in
-        0)
-          pytest -v -s \
-            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama3_eagle]' \
-            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama3_eagle]'
-          ;;
-        1)
-          pytest -v -s \
-            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama4_eagle]' \
-            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama4_eagle]'
-          ;;
-        2)
-          pytest -v -s \
-            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama4_eagle_mm]'
-          ;;
-        3)
-          pytest -v -s \
-            'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama4_eagle_mm]'
-          ;;
-      esac
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - export VLLM_MEDIA_CACHE=/tmp/vllm-media-cache
+  - |
+    pytest -v -s \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama3_eagle]' \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama3_eagle]'
+
+- label: V1 e2e (4 GPUs) - Part 2 # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/v1/e2e
+  commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - export VLLM_MEDIA_CACHE=/tmp/vllm-media-cache
+  - |
+    pytest -v -s \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama4_eagle]' \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama4_eagle]'
+
+- label: V1 e2e (4 GPUs) - Part 3 # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/v1/e2e
+  commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - export VLLM_MEDIA_CACHE=/tmp/vllm-media-cache
+  - |
+    pytest -v -s \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama4_eagle_mm]'
+
+- label: V1 e2e (4 GPUs) - Part 4 # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/v1/e2e
+  commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - export VLLM_MEDIA_CACHE=/tmp/vllm-media-cache
+  - |
+    pytest -v -s \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama4_eagle_mm]'
 
 - label: V1 e2e (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180

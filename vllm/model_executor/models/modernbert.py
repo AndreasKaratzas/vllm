@@ -25,6 +25,7 @@ from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding
@@ -105,11 +106,12 @@ class ModernBertAttention(nn.Module):
                 rope_theta = config.global_rope_theta
             rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
 
+        rope_kwargs = {"dtype": torch.float16} if current_platform.is_cuda() else {}
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=rope_parameters,
-            dtype=torch.float16,
+            **rope_kwargs,
         )
         self.attn = EncoderOnlyAttention(
             self.num_heads,
