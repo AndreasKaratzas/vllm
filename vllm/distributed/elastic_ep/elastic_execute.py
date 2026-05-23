@@ -66,6 +66,15 @@ _MOE_TOPOLOGY_STATE_SUFFIXES = (
 )
 
 
+_MOE_TOPOLOGY_STATE_SUFFIXES = (
+    "expert_map",
+    "expert_mask",
+    "expert_global_to_physical",
+    "expert_physical_to_global",
+    "expert_local_to_global",
+)
+
+
 def batch_transfer_weights(
     model: nn.Module,
     is_sender: bool,

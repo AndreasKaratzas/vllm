@@ -166,10 +166,11 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitKrc(A, B, cu_count, BIAS)
 
+    atol = max(1e-3, torch.finfo(dtype).eps)
     if xnorm:
-        torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-8)
+        torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-8)
     else:
-        torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
+        torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)

@@ -76,6 +76,19 @@ class RocmAttentionMetadata:
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # On gfx950, ROCm attention faults during full decode CUDA graph
+        # capture. Piecewise graphs keep attention outside the graph and avoid
+        # the invalid memory access while preserving graphing for safe regions.
+        if current_platform.is_device_capability((9, 5)):
+            return AttentionCGSupport.NEVER
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,

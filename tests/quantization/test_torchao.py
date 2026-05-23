@@ -12,6 +12,10 @@ DEVICE_TYPE = current_platform.device_type
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
+TORCHAO_DYNAMIC_FP8_GFX950_UNSUPPORTED = pytest.mark.skipif(
+    current_platform.is_rocm() and current_platform.is_device_capability((9, 5)),
+    reason="torchao 0.17 dynamic FP8 quantization rejects gfx950/MI355",
+)
 
 
 @pytest.mark.skipif(
@@ -90,6 +94,7 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@TORCHAO_DYNAMIC_FP8_GFX950_UNSUPPORTED
 def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
     """Testing online quantization, load_weights integration point,
     with config dict serialized to json string
@@ -135,6 +140,7 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@TORCHAO_DYNAMIC_FP8_GFX950_UNSUPPORTED
 def test_online_quant_config_file(vllm_runner):
     """Testing on the fly quantization, load_weights integration point,
     with config file
@@ -170,6 +176,7 @@ def test_online_quant_config_file(vllm_runner):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@TORCHAO_DYNAMIC_FP8_GFX950_UNSUPPORTED
 def test_reload_weights():
     import json
 

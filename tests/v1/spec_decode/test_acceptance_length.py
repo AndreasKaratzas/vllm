@@ -9,16 +9,16 @@ dataset and asserts that the mean acceptance length is within tolerance of
 the expected baseline.
 """
 
+import json
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 import pytest
 import torch
+from huggingface_hub import hf_hub_download
 
 from tests.conftest import VllmRunner
 from tests.utils import large_gpu_mark
 from vllm import SamplingParams
-from vllm.benchmarks.datasets import get_samples
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -149,31 +149,23 @@ def get_tp_size_params() -> list[pytest.param]:
 def get_mt_bench_prompts(
     tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS
 ) -> list[list[int]]:
-    args = SimpleNamespace(
-        dataset_name="hf",
-        dataset_path="philschmid/mt-bench",
-        num_prompts=num_prompts,
-        seed=42,
-        no_oversample=False,
-        endpoint_type="openai-chat",
-        input_len=None,
-        output_len=DEFAULT_OUTPUT_LEN,
-        sharegpt_output_len=DEFAULT_OUTPUT_LEN,
-        hf_name=None,
-        hf_split="train",
-        hf_subset=None,
-        hf_output_len=DEFAULT_OUTPUT_LEN,
-        no_stream=True,
-        disable_shuffle=False,
-        skip_chat_template=False,
-        trust_remote_code=False,
-        enable_multimodal_chat=False,
-        request_id_prefix="",
+    dataset_path = hf_hub_download(
+        repo_id="philschmid/mt-bench",
+        filename="question.jsonl",
+        repo_type="dataset",
     )
-    samples = get_samples(args, tokenizer)
-    prompt_ids = [
-        tokenizer.encode(sample.prompt, add_special_tokens=False) for sample in samples
-    ]
+    prompt_ids: list[list[int]] = []
+    with open(dataset_path, encoding="utf-8") as f:
+        for line in f:
+            if len(prompt_ids) >= num_prompts:
+                break
+            prompt = json.loads(line)["turns"][0]
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            prompt_ids.append(tokenizer.encode(prompt, add_special_tokens=False))
     return prompt_ids
 
 
