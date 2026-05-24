@@ -31,6 +31,10 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen3-8B",
 ]
 
+USE_ROCM_AITER = current_platform.is_rocm() and current_platform.has_device_capability(
+    (9, 4)
+)
+
 
 # @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
@@ -112,7 +116,7 @@ AITER_MODEL_LIST = [
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+    "use_rocm_aiter", [True, False] if USE_ROCM_AITER else [False]
 )
 @pytest.mark.parametrize("use_prompt_embeds", [True, False])
 def test_models(
