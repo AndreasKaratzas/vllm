@@ -1374,6 +1374,8 @@ def multi_process_parallel(
                 "shellcheck",
                 "dist",
                 "ep_kernels_workspace",
+                "raw_logs",
+                "vllm/*.so",
             ],
         }
     )

@@ -100,7 +100,7 @@ def test_full_graph(
 
     if (
         current_platform.is_rocm()
-        and model_kwargs.get("quantization") == "gptq"
+        and model_kwargs.get("quantization") in {"gptq", "gptq_marlin"}
         and compilation_mode == CompilationMode.DYNAMO_TRACE_ONCE
         and not is_torch_equal_or_newer("2.11.0")
     ):
