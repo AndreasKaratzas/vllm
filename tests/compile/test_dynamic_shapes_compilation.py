@@ -58,6 +58,11 @@ def test_dynamic_shapes_compilation(
     if evaluate_guards and shapes_type == DynamicShapesType.UNBACKED:
         pytest.skip("unbacked dynamic shapes do not add guards")
 
+    if shapes_type == DynamicShapesType.UNBACKED and not is_torch_equal_or_newer(
+        "2.11.0"
+    ):
+        pytest.skip("unbacked dynamic shapes require PyTorch 2.11+")
+
     # TODO is this still a requirement?
     if evaluate_guards and use_aot_compile:
         pytest.skip("evaluate_guards requires use_aot_compile=0")

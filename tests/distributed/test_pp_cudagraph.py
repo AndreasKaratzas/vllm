@@ -3,7 +3,11 @@
 import pytest
 from typing_extensions import LiteralString
 
+from vllm.platforms import current_platform
+
 from ..utils import compare_two_settings, create_new_process_for_each_test
+
+DEFAULT_ATTN_BACKEND = "ROCM_ATTN" if current_platform.is_rocm() else "FLASH_ATTN"
 
 
 @pytest.mark.parametrize(
@@ -15,7 +19,7 @@ from ..utils import compare_two_settings, create_new_process_for_each_test
 @pytest.mark.parametrize(
     "ATTN_BACKEND",
     [
-        "FLASH_ATTN",
+        DEFAULT_ATTN_BACKEND,
     ],
 )
 @create_new_process_for_each_test()

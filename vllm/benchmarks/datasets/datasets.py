@@ -51,6 +51,10 @@ from vllm.utils.import_utils import PlaceholderModule
 
 try:
     from datasets import load_dataset
+
+    from vllm.utils.hf_datasets import install_list_feature_compat
+
+    install_list_feature_compat()
 except ImportError:
     datasets = PlaceholderModule("datasets")
     load_dataset = datasets.placeholder_attr("load_dataset")
