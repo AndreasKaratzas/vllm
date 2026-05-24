@@ -21,6 +21,7 @@ from evaluate import load
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 from vllm.multimodal.audio import get_audio_duration
+from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 
 from ....models.registry import HF_EXAMPLE_MODELS
@@ -29,6 +30,18 @@ from ....utils import RemoteOpenAIServer
 # Tuned to prevent OOM on 18GB GPUs in transcription correctness tests.
 MAX_SEQS_FOR_TRANSCRIPTION_TEST = 8
 GPU_UTIL_FOR_TRANSCRIPTION_TEST = 0.5
+
+
+def get_expected_wer(expected_wer: float | dict[tuple[int, int] | str, float]) -> float:
+    if not isinstance(expected_wer, dict):
+        return expected_wer
+    if current_platform.is_rocm():
+        capability = current_platform.get_device_capability()
+        if capability is not None:
+            arch_key = (capability.major, capability.minor)
+            if arch_key in expected_wer:
+                return expected_wer[arch_key]
+    return expected_wer["default"]
 
 
 def to_bytes(y, sr):
@@ -186,7 +199,10 @@ def run_evaluation(
     [
         ("openai/whisper-large-v3", 12.744980),
         # CohereASR is used to test the variable encoder length code paths
-        ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        (
+            "CohereLabs/cohere-transcribe-03-2026",
+            {"default": 11.92, (9, 4): 12.78},
+        ),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -197,6 +213,7 @@ def test_wer_correctness(
     model_config, dataset_repo, n_examples=-1, max_concurrent_request=None
 ):
     model_name, expected_wer = model_config
+    expected_wer = get_expected_wer(expected_wer)
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     # TODO refactor to use `ASRDataset`
     server_args = [

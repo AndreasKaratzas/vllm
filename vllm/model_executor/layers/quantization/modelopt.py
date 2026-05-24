@@ -93,6 +93,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
 if TYPE_CHECKING:
@@ -469,7 +470,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         weight_dtype = (
-            torch.float8_e4m3fn
+            current_platform.fp8_dtype()
             if self.quant_config.is_checkpoint_fp8_serialized
             else params_dtype
         )
@@ -572,7 +573,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                dtype=torch.float8_e4m3fn,
+                dtype=current_platform.fp8_dtype(),
             ),
             input_dim=1,
             output_dim=0,
@@ -669,7 +670,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                dtype=torch.float8_e4m3fn,
+                dtype=current_platform.fp8_dtype(),
             ),
             input_dim=1,
             output_dim=0,
@@ -797,7 +798,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         # Use FP8 dtype if checkpoint is serialized
         weight_dtype = (
-            torch.float8_e4m3fn
+            current_platform.fp8_dtype()
             if self.quant_config.is_checkpoint_fp8_serialized
             else params_dtype
         )

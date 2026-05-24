@@ -192,6 +192,8 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        torch.cuda.synchronize()
+
         total_bytes = 0
         backup_bytes = 0
 
@@ -221,8 +223,10 @@ class CuMemAllocator:
             (total_bytes - backup_bytes) / 1024**3,
         )
 
+        torch.cuda.synchronize()
         gc.collect()
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
@@ -234,6 +238,7 @@ class CuMemAllocator:
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.
         """
+        torch.cuda.synchronize()
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
                 handle = data.handle
@@ -247,6 +252,7 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+        torch.cuda.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

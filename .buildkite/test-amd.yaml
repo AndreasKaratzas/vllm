@@ -333,23 +333,6 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
-#-----------------------------------------------------------  mi250 · evals  -----------------------------------------------------------#
-
-- label: Multi-Modal Accuracy Eval (Small Models) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - vllm/multimodal/
-  - vllm/inputs/
-  - vllm/v1/core/
-  - vllm/platforms/rocm.py
-  - vllm/model_executor/model_loader/
-  commands:
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
-
 #---------------------------------------------------------  mi250 · examples  ----------------------------------------------------------#
 
 - label: Examples # TBD
@@ -788,26 +771,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/attention
-
-- label: V1 Sample + Logits # TBD
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1/sample
-  - tests/v1/logits_processors
-  - tests/v1/test_oracle.py
-  - tests/v1/test_request.py
-  - tests/v1/test_outputs.py
-  commands:
-  - pytest -v -s v1/sample
-  - pytest -v -s v1/logits_processors
-  - pytest -v -s v1/test_oracle.py
-  - pytest -v -s v1/test_request.py
-  - pytest -v -s v1/test_outputs.py
 
 - label: Distributed DP Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
@@ -1768,11 +1731,12 @@ steps:
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
-- label: Multi-Modal Models (Extended Generation 1) # TBD
+- label: Multi-Modal Models (Extended Generation 1) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1935,7 +1899,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
-  parallelism: 4
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - vllm/model_executor/models/

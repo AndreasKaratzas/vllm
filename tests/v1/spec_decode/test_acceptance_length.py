@@ -68,7 +68,12 @@ EAGLE3_MODEL_CONFIGS = [
         id="gpt-oss-20b-eagle3",
         # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
         # FLASHINFER does not support ("sink setting not supported")
-        excluded_backends={AttentionBackendEnum.FLASHINFER},
+        # ROCM_ATTN is also incompatible: gpt-oss-20b uses sink attention and
+        # ROCM_ATTN intentionally falls back to Triton for sink requests.
+        excluded_backends={
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.ROCM_ATTN,
+        },
     ),
     Eagle3ModelConfig(
         verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
