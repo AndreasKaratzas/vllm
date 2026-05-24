@@ -47,13 +47,11 @@ logger = init_logger(__name__)
 
 
 def _ray_gpu_ids_to_visible_devices(gpu_ids: list[int]) -> str:
-    device_ids: list[int] = []
-    for gpu_id in gpu_ids:
-        try:
-            device_ids.append(current_platform.device_id_to_physical_device_id(gpu_id))
-        except IndexError:
-            device_ids.append(gpu_id)
-    return ",".join(map(str, device_ids))
+    # Ray reports the accelerator ids assigned to the actor. On ROCm these ids
+    # are already the values Ray used for CUDA_VISIBLE_DEVICES; remapping them
+    # through the driver's visibility mask can collapse distinct actors onto the
+    # same GPU when the driver itself was launched with a nonzero mask.
+    return ",".join(map(str, gpu_ids))
 
 
 @dataclass
@@ -241,10 +239,11 @@ class RayExecutorV2(MultiprocExecutor):
         env_vars = runtime_env.setdefault("env_vars", {})
         noset_device_env_vars = current_platform.ray_noset_device_env_vars
         if current_platform.is_rocm():
-            # Let Ray set ROCm visibility before the actor imports vLLM. RCCL
-            # can otherwise see the parent process's device set and reject
-            # cross-DP communicators as duplicate-GPU groups.
-            noset_device_env_vars = []
+            # Let Ray set CUDA/HIP visibility before the actor imports vLLM,
+            # but keep ROCR unset. A nonzero ROCR_VISIBLE_DEVICES value is an
+            # additional physical-device filter and can hide the actor's only
+            # visible HIP device.
+            noset_device_env_vars = ["RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES"]
         env_vars.update({v: "1" for v in noset_device_env_vars})
         if self.parallel_config.ray_workers_use_nsight:
             runtime_env["nsight"] = {

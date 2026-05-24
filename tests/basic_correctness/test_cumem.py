@@ -49,7 +49,7 @@ def test_python_error():
     allocator = CuMemAllocator.get_instance()
     free_bytes, total_bytes = torch.cuda.mem_get_info()
     if current_platform.is_rocm():
-        alloc_bytes = int(free_bytes * 0.35)
+        alloc_bytes = int(free_bytes * 0.6)
     else:
         alloc_bytes = int(total_bytes * 0.7)
     tensors = []

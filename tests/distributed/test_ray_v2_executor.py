@@ -17,11 +17,19 @@ import ray
 from vllm import LLM
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
+from vllm.v1.executor.ray_executor_v2 import (
+    RayExecutorV2,
+    _ray_gpu_ids_to_visible_devices,
+)
 
 pytestmark = pytest.mark.usefixtures("enable_ray_v2_backend")
 
 MODEL = "facebook/opt-125m"
+
+
+def test_ray_gpu_ids_to_visible_devices_preserves_ray_ids(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,2")
+    assert _ray_gpu_ids_to_visible_devices([1, 2]) == "1,2"
 
 
 def create_vllm_config(

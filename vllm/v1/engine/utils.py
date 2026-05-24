@@ -279,10 +279,10 @@ def set_device_control_env_var(
 def get_device_visibility_env_vars(value: str) -> dict[str, str]:
     env_vars = {current_platform.device_control_env_var: value}
     if current_platform.is_rocm():
-        # RCCL/HIP may consult any of these visibility aliases. Keep them in
-        # sync so Ray DP workers do not form communicators on duplicate GPUs.
+        # HIP mirrors CUDA's visible-device syntax on ROCm. Do not set
+        # ROCR_VISIBLE_DEVICES here: applying both HIP/CUDA and ROCR filters to
+        # nonzero ordinals can hide all devices from PyTorch.
         env_vars["HIP_VISIBLE_DEVICES"] = value
-        env_vars["ROCR_VISIBLE_DEVICES"] = value
     return env_vars
 
 
