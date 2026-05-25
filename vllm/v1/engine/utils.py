@@ -272,18 +272,8 @@ def set_device_control_env_var(
     evar = current_platform.device_control_env_var
 
     value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
-    with patch.dict(os.environ, get_device_visibility_env_vars(value)):
+    with patch.dict(os.environ, values=((evar, value),)):
         yield
-
-
-def get_device_visibility_env_vars(value: str) -> dict[str, str]:
-    env_vars = {current_platform.device_control_env_var: value}
-    if current_platform.is_rocm():
-        # HIP mirrors CUDA's visible-device syntax on ROCm. Do not set
-        # ROCR_VISIBLE_DEVICES here: applying both HIP/CUDA and ROCR filters to
-        # nonzero ordinals can hide all devices from PyTorch.
-        env_vars["HIP_VISIBLE_DEVICES"] = value
-    return env_vars
 
 
 def get_device_indices(

@@ -49,7 +49,16 @@ def test_python_error():
     allocator = CuMemAllocator.get_instance()
     free_bytes, total_bytes = torch.cuda.mem_get_info()
     if current_platform.is_rocm():
-        alloc_bytes = int(free_bytes * 0.6)
+        # Allocate just over half of currently free memory: one allocation
+        # should fit, but restoring the sleeping allocation while a second one
+        # is live should fail. Use a bounded margin instead of an
+        # architecture-specific fraction.
+        wakeup_failure_margin = min(
+            2 * GiB_bytes,
+            max(free_bytes // 64, GiB_bytes // 4),
+            free_bytes // 4,
+        )
+        alloc_bytes = free_bytes // 2 + wakeup_failure_margin
     else:
         alloc_bytes = int(total_bytes * 0.7)
     tensors = []

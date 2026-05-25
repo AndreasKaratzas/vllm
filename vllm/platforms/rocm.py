@@ -119,15 +119,6 @@ def _sync_hip_cuda_env_vars():
 
     if hip_val is not None and cuda_val is not None:
         if hip_val != cuda_val:
-            if os.environ.get("RAY_WORKER_ID") or os.environ.get("RAY_JOB_ID"):
-                logger.debug(
-                    "Ray set HIP_VISIBLE_DEVICES='%s' while CUDA_VISIBLE_DEVICES "
-                    "remained '%s'; syncing CUDA_VISIBLE_DEVICES to HIP.",
-                    hip_val,
-                    cuda_val,
-                )
-                os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
-                return
             raise ValueError(
                 f"Inconsistent GPU visibility env vars: "
                 f"HIP_VISIBLE_DEVICES='{hip_val}' vs "
