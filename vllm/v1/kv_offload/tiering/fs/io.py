@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import errno
 import logging
 import os
 import random
@@ -29,6 +30,10 @@ def _ensure_dirs(path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
 
+def _is_direct_io_alignment_error(exc: OSError) -> bool:
+    return O_DIRECT != 0 and exc.errno == errno.EINVAL
+
+
 def store_block(
     dest_path: str,
     buffer: memoryview,
@@ -50,19 +55,39 @@ def store_block(
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
     view_slice = buffer.cast("B")[offset : offset + block_size]
     try:
-        fd = os.open(
-            tmp_path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | O_DIRECT,
-            0o644,
-        )
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | O_DIRECT
         try:
-            written = os.write(fd, view_slice)
-            if written < len(view_slice):
-                raise OSError(
-                    f"Short write: expected {len(view_slice)} bytes, wrote {written}"
-                )
-        finally:
-            os.close(fd)
+            fd = os.open(tmp_path, flags, 0o644)
+            try:
+                written = os.write(fd, view_slice)
+                if written < len(view_slice):
+                    raise OSError(
+                        f"Short write: expected {len(view_slice)} bytes, "
+                        f"wrote {written}"
+                    )
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            if not _is_direct_io_alignment_error(exc):
+                raise
+            try:
+                os.remove(tmp_path)
+            except FileNotFoundError:
+                pass
+            fd = os.open(
+                tmp_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC,
+                0o644,
+            )
+            try:
+                written = os.write(fd, view_slice)
+                if written < len(view_slice):
+                    raise OSError(
+                        f"Short write: expected {len(view_slice)} bytes, "
+                        f"wrote {written}"
+                    )
+            finally:
+                os.close(fd)
         os.replace(tmp_path, dest_path)
     except Exception:
         try:
@@ -84,8 +109,17 @@ def load_block(
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
     try:
-        fd = os.open(source_path, os.O_RDONLY | O_DIRECT)
-        bytes_read = os.readv(fd, [view_slice])
+        try:
+            fd = os.open(source_path, os.O_RDONLY | O_DIRECT)
+            bytes_read = os.readv(fd, [view_slice])
+        except OSError as exc:
+            if fd is not None:
+                os.close(fd)
+                fd = None
+            if not _is_direct_io_alignment_error(exc):
+                raise
+            fd = os.open(source_path, os.O_RDONLY)
+            bytes_read = os.readv(fd, [view_slice])
         if bytes_read < block_size:
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
     except Exception:

@@ -903,8 +903,9 @@ class NixlConnectorWorker:
             self.use_host_buffer,
         )
 
-        caches_data = []
-        # With hybrid allocator, layers can share a kv cache tensor
+        registered_regions = []
+        registered_region_keys: set[tuple[int, int, int]] = set()
+        # With hybrid allocator, layers can share a kv cache tensor.
         seen_base_addresses = []
 
         # Note(tms): I modified this from the original region setup code.
@@ -982,6 +983,17 @@ class NixlConnectorWorker:
             # registering a single tensor for both K/V and splitting logically like FI.
             for cache in cache_list:
                 base_addr = cache.data_ptr()
+                # Need to make sure the device ID is non-negative for NIXL,
+                # Torch uses -1 to indicate CPU tensors.
+                self.device_id = max(cache.get_device(), 0)
+                reg_base_addr, reg_size_bytes = _get_registration_region(
+                    cache,
+                    curr_tensor_size_bytes,
+                    use_storage_region=(
+                        isinstance(layer_spec, MambaSpec)
+                        and self.nixl_memory_type == "DRAM"
+                    ),
+                )
                 if base_addr in seen_base_addresses:
                     record_group_regions(layer_name, region_ids_by_base_addr[base_addr])
                     # NOTE (NickLucche) HMA employs memory pooling to share tensors
@@ -993,8 +1005,8 @@ class NixlConnectorWorker:
                 logger.debug(
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
+                region_index = len(seen_base_addresses)
                 seen_base_addresses.append(base_addr)
-                region_index = len(caches_data)
                 region_ids = (
                     [2 * region_index, 2 * region_index + 1]
                     if self.transfer_topo.is_kv_layout_blocks_first
@@ -1032,20 +1044,13 @@ class NixlConnectorWorker:
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
                         "All kv cache tensors must have the same size"
                     )
-                # Need to make sure the device ID is non-negative for NIXL,
-                # Torch uses -1 to indicate CPU tensors.
-                self.device_id = max(cache.get_device(), 0)
-                reg_base_addr, reg_size_bytes = _get_registration_region(
-                    cache,
-                    curr_tensor_size_bytes,
-                    use_storage_region=(
-                        isinstance(layer_spec, MambaSpec)
-                        and self.nixl_memory_type == "DRAM"
-                    ),
-                )
-                caches_data.append(
-                    (reg_base_addr, reg_size_bytes, self.device_id, "")
-                )
+
+                reg_key = (reg_base_addr, reg_size_bytes, self.device_id)
+                if reg_key not in registered_region_keys:
+                    registered_region_keys.add(reg_key)
+                    registered_regions.append(
+                        (reg_base_addr, reg_size_bytes, self.device_id, "")
+                    )
 
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
@@ -1053,7 +1058,7 @@ class NixlConnectorWorker:
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
-        self.num_regions = len(caches_data)
+        self.num_regions = len(seen_base_addresses)
 
         if self.transfer_topo.is_kv_layout_blocks_first:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
@@ -1069,8 +1074,10 @@ class NixlConnectorWorker:
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
 
-        descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
-        logger.debug("Registering descs: %s", caches_data)
+        descs = self.nixl_wrapper.get_reg_descs(
+            registered_regions, self.nixl_memory_type
+        )
+        logger.debug("Registering descs: %s", registered_regions)
         self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)

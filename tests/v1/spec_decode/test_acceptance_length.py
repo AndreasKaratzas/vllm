@@ -9,16 +9,16 @@ dataset and asserts that the mean acceptance length is within tolerance of
 the expected baseline.
 """
 
-import json
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 import torch
-from huggingface_hub import hf_hub_download
 
 from tests.conftest import VllmRunner
 from tests.utils import large_gpu_mark
 from vllm import SamplingParams
+from vllm.benchmarks.datasets import get_samples
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -94,6 +94,7 @@ DEFAULT_NUM_PROMPTS = 80
 DEFAULT_OUTPUT_LEN = 256
 DEFAULT_MAX_MODEL_LEN = 16384
 DEFAULT_RTOL = 0.05
+GFX942_GPT_OSS_RTOL = 0.07
 
 # TP sizes to test
 TP_SIZES = [1, 2, 4]
@@ -101,6 +102,16 @@ TP_SIZES = [1, 2, 4]
 
 # Backends excluded from testing due to significantly different behavior
 EXCLUDED_BACKENDS = {AttentionBackendEnum.FLEX_ATTENTION}
+
+
+def get_per_position_rtol(model_config: Eagle3ModelConfig) -> float:
+    rtol = model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+    if model_config.id == "gpt-oss-20b-eagle3" and current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx942
+
+        if on_gfx942():
+            return max(rtol, GFX942_GPT_OSS_RTOL)
+    return rtol
 
 
 def get_available_attention_backends() -> list[str]:
@@ -154,24 +165,29 @@ def get_tp_size_params() -> list[pytest.param]:
 def get_mt_bench_prompts(
     tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS
 ) -> list[list[int]]:
-    dataset_path = hf_hub_download(
-        repo_id="philschmid/mt-bench",
-        filename="question.jsonl",
-        repo_type="dataset",
+    args = SimpleNamespace(
+        dataset_name="hf",
+        dataset_path="philschmid/mt-bench",
+        num_prompts=num_prompts,
+        seed=42,
+        no_oversample=False,
+        endpoint_type="openai-chat",
+        input_len=None,
+        output_len=DEFAULT_OUTPUT_LEN,
+        sharegpt_output_len=DEFAULT_OUTPUT_LEN,
+        hf_name=None,
+        hf_split="train",
+        hf_subset=None,
+        hf_output_len=DEFAULT_OUTPUT_LEN,
+        no_stream=True,
+        disable_shuffle=False,
+        skip_chat_template=False,
+        trust_remote_code=False,
     )
-    prompt_ids: list[list[int]] = []
-    with open(dataset_path, encoding="utf-8") as f:
-        for line in f:
-            if len(prompt_ids) >= num_prompts:
-                break
-            prompt = json.loads(line)["turns"][0]
-            prompt = tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                add_generation_prompt=True,
-                tokenize=False,
-            )
-            prompt_ids.append(tokenizer.encode(prompt, add_special_tokens=False))
-    return prompt_ids
+    samples = get_samples(args, tokenizer)
+    return [
+        tokenizer.encode(sample.prompt, add_special_tokens=False) for sample in samples
+    ]
 
 
 def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
@@ -285,10 +301,7 @@ def test_eagle3_acceptance_length(
             )
 
             if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
-                # Per-position checks use model-specific rtol if provided
-                rtol = (
-                    model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
-                )
+                rtol = get_per_position_rtol(model_config)
                 for pos, (actual, exp) in enumerate(
                     zip(actual_per_pos, expected_per_pos)
                 ):

@@ -58,11 +58,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
   // Compute SiLU(gate) * up
   float sigmoid_gate = 1.0f / (1.0f + expf(-gate));
   float silu_gate = gate * sigmoid_gate;
-  // Match the eager activation path, which rounds SiLU and product to dtype.
-  scalar_t rounded_silu_gate = static_cast<scalar_t>(silu_gate);
-  scalar_t rounded_result =
-      static_cast<scalar_t>(static_cast<float>(rounded_silu_gate) * up);
-  float result = static_cast<float>(rounded_result);  // Keep in register
+  float result = silu_gate * up;  // Keep in register
 
   // Step 2: Reduce to find group max
   shared_max[tid] = fabsf(result);
