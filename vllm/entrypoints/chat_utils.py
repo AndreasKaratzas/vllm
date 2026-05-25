@@ -1819,12 +1819,21 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 
             for item in tool_calls:
                 if not isinstance(item, dict):
-                    continue
+                    raise VLLMValidationError(
+                        "assistant tool_calls entries must be objects.",
+                        parameter="tool_calls",
+                    )
+
                 function = item.get("function")
-                if function is None:
-                    # OpenAI's request schema also permits custom tool calls,
-                    # which do not have function arguments to normalize here.
-                    continue
+                if item.get("type", "function") != "function" or not isinstance(
+                    function, dict
+                ):
+                    raise VLLMValidationError(
+                        "chat completions only support assistant tool_calls "
+                        "of type 'function'.",
+                        parameter="tool_calls",
+                    )
+
                 # if arguments is None or empty string, set to {}
                 if content := function.get("arguments"):
                     if not isinstance(content, (dict, list)):
