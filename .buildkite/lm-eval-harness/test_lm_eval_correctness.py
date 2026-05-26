@@ -17,8 +17,11 @@ import pytest
 import yaml
 
 from vllm.platforms import current_platform
+from vllm.utils.hf_datasets import install_list_feature_compat
 
 DEFAULT_RTOL = 0.08
+
+install_list_feature_compat()
 
 
 @contextmanager

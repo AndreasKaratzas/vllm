@@ -91,6 +91,21 @@ def test_full_graph(
         # int8 removed on Blackwell:
         pytest.skip("int8 support removed on Blackwell")
 
+    if (
+        current_platform.is_rocm()
+        and not current_platform.has_device_capability((9, 4))
+        and "fp8" in model.lower()
+    ):
+        pytest.skip("FP8 fullgraph compile requires MI300+ on ROCm")
+
+    if (
+        current_platform.is_rocm()
+        and model_kwargs.get("quantization") in {"gptq", "gptq_marlin"}
+        and compilation_mode == CompilationMode.DYNAMO_TRACE_ONCE
+        and not is_torch_equal_or_newer("2.11.0")
+    ):
+        pytest.skip("GPTQ dynamo trace once requires PyTorch 2.11+ on ROCm")
+
     with monkeypatch.context():
         print(f"MODEL={model}")
 
@@ -179,6 +194,13 @@ def test_custom_compile_config(
         # int8 removed on Blackwell:
         pytest.skip("int8 support removed on Blackwell")
 
+    if (
+        current_platform.is_rocm()
+        and not current_platform.has_device_capability((9, 4))
+        and "fp8" in model.lower()
+    ):
+        pytest.skip("FP8 fullgraph compile requires MI300+ on ROCm")
+
     if compilation_config.use_inductor_graph_partition and not is_torch_equal_or_newer(
         "2.9.0.dev"
     ):
@@ -207,6 +229,11 @@ def test_fp8_kv_scale_compile(
     model: str,
     backend: AttentionBackendEnum | None,
 ):
+    if current_platform.is_rocm() and not current_platform.has_device_capability(
+        (9, 4)
+    ):
+        pytest.skip("FP8 fullgraph compile requires MI300+ on ROCm")
+
     model_kwargs = {
         "quantization": "fp8",
         "kv_cache_dtype": "fp8_e4m3",

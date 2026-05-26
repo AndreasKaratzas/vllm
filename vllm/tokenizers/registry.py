@@ -248,6 +248,9 @@ def get_tokenizer(
     else:
         tokenizer_cls_ = tokenizer_cls
 
+    if model_type == "llama4":
+        kwargs.setdefault("config", config)
+
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
     if not tokenizer.is_fast:
         logger.warning(

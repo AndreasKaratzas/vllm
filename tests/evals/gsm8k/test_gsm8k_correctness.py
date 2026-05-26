@@ -44,6 +44,7 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         num_shots=eval_config["num_fewshot"],
         host=host,
         port=port,
+        request_timeout_s=eval_config.get("request_timeout_s", 1800),
     )
 
     return results
@@ -52,6 +53,7 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
 def test_gsm8k_correctness(config_filename):
     """Test GSM8K correctness for a given model configuration."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
+    config_name = config_filename.name
 
     if (
         not current_platform.is_cuda()
@@ -61,6 +63,21 @@ def test_gsm8k_correctness(config_filename):
             "Skipping Qwen3-30B-A3B-MXFP4A16 on non-CUDA platforms. "
             "Marlin kernels are not supported."
         )
+
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        is_fp4_config = "FP4" in eval_config["model_name"] or "FP4" in config_name
+        is_mxfp4_config = (
+            "MXFP4" in eval_config["model_name"] or "MXFP4" in config_name
+        )
+        if is_fp4_config and not (is_mxfp4_config and on_gfx950()):
+            pytest.skip(
+                "Skipping FP4 GSM8K configs on ROCm except MXFP4 on gfx950."
+            )
+
+        if "MI355" in config_name and not on_gfx950():
+            pytest.skip("Skipping MI355 GSM8K config on non-gfx950 ROCm platform.")
 
     # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
     if current_platform.is_rocm() and (

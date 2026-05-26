@@ -342,6 +342,9 @@ async def test_chat_request(
     completion_embeddings = EmbeddingResponse.model_validate(
         completion_response.model_dump(mode="json")
     )
+    expected_add_generation_prompt_tokens = len(
+        tokenizer(prompt, add_special_tokens=False).input_ids
+    )
 
     assert chat_embeddings.id is not None
     assert completion_embeddings.id is not None
@@ -369,9 +372,21 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 34
+    assert output.usage.prompt_tokens == expected_add_generation_prompt_tokens
 
     # test continue_final_message
+    continue_final_message_prompt = tokenizer.apply_chat_template(
+        messages,
+        chat_template=DUMMY_CHAT_TEMPLATE,
+        add_generation_prompt=False,
+        continue_final_message=True,
+        tokenize=False,
+    )
+    expected_continue_final_message_tokens = len(
+        tokenizer(
+            continue_final_message_prompt, add_special_tokens=False
+        ).input_ids
+    )
     response = requests.post(
         server.url_for("v1/embeddings"),
         json={
@@ -387,9 +402,12 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 33
+    assert output.usage.prompt_tokens == expected_continue_final_message_tokens
 
     # test add_special_tokens
+    expected_add_special_tokens = len(
+        tokenizer(prompt, add_special_tokens=True).input_ids
+    )
     response = requests.post(
         server.url_for("v1/embeddings"),
         json={"model": model_name, "messages": messages, "add_special_tokens": True},
@@ -401,7 +419,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 36
+    assert output.usage.prompt_tokens == expected_add_special_tokens
 
     # test continue_final_message with add_generation_prompt
     response = requests.post(

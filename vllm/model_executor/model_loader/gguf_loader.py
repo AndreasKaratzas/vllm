@@ -251,6 +251,18 @@ class GGUFModelLoader(BaseModelLoader):
                 for name, tensor in state_dict.items()
             }
 
+        def normalize_gemma3_vision_name(hf_name: str) -> str:
+            if (
+                is_multimodal
+                and model_type == "gemma3"
+                and hf_name.startswith("model.vision_tower.")
+                and not hf_name.startswith("model.vision_tower.vision_model.")
+            ):
+                return hf_name.replace(
+                    "model.vision_tower.", "model.vision_tower.vision_model.", 1
+                )
+            return hf_name
+
         def find_hf_name_in_tensor_map(hf_name: str) -> str | None:
             """
             Map HuggingFace parameter name to GGUF tensor name.
@@ -270,6 +282,8 @@ class GGUFModelLoader(BaseModelLoader):
                 GGUF tensor name with suffix (e.g., 'mm.soft_emb_norm.weight')
                 or None if no mapping found
             """
+            hf_name = normalize_gemma3_vision_name(hf_name)
+
             # In transformers v5, multimodal models (e.g. Gemma3) wrap
             # all sub-models under an outer 'model.' attribute, producing
             # state_dict keys like 'model.language_model.layers.0...' and
@@ -321,8 +335,11 @@ class GGUFModelLoader(BaseModelLoader):
 
             # Track mapping success
             if gguf_name_with_suffix is not None:
-                gguf_to_hf_name_map[gguf_name_with_suffix] = hf_name
-                logger.debug("Mapped GGUF %s → HF %s", gguf_name_with_suffix, hf_name)
+                mapped_hf_name = normalize_gemma3_vision_name(hf_name)
+                gguf_to_hf_name_map[gguf_name_with_suffix] = mapped_hf_name
+                logger.debug(
+                    "Mapped GGUF %s → HF %s", gguf_name_with_suffix, mapped_hf_name
+                )
             elif hf_name not in gguf_to_hf_name_map.values():
                 # Parameter not in manual overrides either
                 unmapped_params.append(hf_name)

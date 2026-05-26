@@ -13,6 +13,7 @@ THRESHOLD=${1:-0.25}
 NUM_Q=${2:-1319}
 PORT=${3:-8030}
 OUT_DIR=${OUT_DIR:-/tmp/vllm-scheduled}
+PREFETCH_EVAL_MAX_CONCURRENCY=${PREFETCH_EVAL_MAX_CONCURRENCY:-32}
 mkdir -p "${OUT_DIR}"
 
 wait_for_server() {
@@ -52,6 +53,7 @@ vllm serve "$MODEL" \
   --offload-prefetch-step 1 \
   --offload-params w13_weight w2_weight \
   --generation-config vllm \
+  --max-num-seqs "${PREFETCH_EVAL_MAX_CONCURRENCY}" \
   --port "$PORT" \
   ${EXTRA_ARGS+"${EXTRA_ARGS[@]}"} &
 SERVER_PID=$!
@@ -59,7 +61,7 @@ wait_for_server "$PORT"
 
 TAG=$(echo "$MODEL" | tr '/: \\n' '_____')
 OUT="${OUT_DIR}/${TAG}_prefetch_offload.json"
-python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --save-results "${OUT}"
+python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --max-concurrency "${PREFETCH_EVAL_MAX_CONCURRENCY}" --save-results "${OUT}"
 python3 - <<PY
 import json; acc=json.load(open('${OUT}'))['accuracy']
 print(f"${MODEL} prefetch_offload: accuracy {acc:.3f}")

@@ -59,6 +59,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -227,8 +228,9 @@ class AutoGPTQConfig(QuantizationConfig):
             "gptq",
             "gptq_marlin",
             "auto_gptq",
-            "marlin",
         )
+        if user_quant == "marlin" and current_platform.is_cuda():
+            is_valid_user_quant = True
 
         if is_valid_user_quant:
             return cls.get_name()

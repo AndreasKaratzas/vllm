@@ -92,6 +92,13 @@ def test_gpt_oss_attention_quantization(
     if tp_size > current_platform.device_count():
         pytest.skip("Not enough GPUs to run this test case")
 
+    if (
+        current_platform.is_rocm()
+        and "MXFP4" in model_name
+        and not current_platform.supports_mx()
+    ):
+        pytest.skip("MXFP4 GPT-OSS quantized models require ROCm MX support.")
+
     if "amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8" in model_name and on_gfx950():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 

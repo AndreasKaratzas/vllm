@@ -177,6 +177,8 @@ def evaluate_gsm8k(
     port: int = 8000,
     temperature: float = 0.0,
     seed: int | None = 42,
+    request_timeout_s: int | None = 1800,
+    max_concurrency: int | None = None,
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -190,23 +192,40 @@ def evaluate_gsm8k(
     async def run_async_evaluation():
         states: list[str] = [""] * num_questions
         output_tokens: list[int] = [0] * num_questions
+        semaphore = (
+            asyncio.Semaphore(max_concurrency)
+            if max_concurrency and max_concurrency > 0
+            else None
+        )
 
         async def get_answer(session: aiohttp.ClientSession, i: int) -> tuple[str, int]:
-            answer, tokens = await call_vllm_api(
-                session=session,
-                prompt=prompts[i],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stop=["Question", "Assistant:", "<|separator|>"],
-                url=base_url,
-                seed=seed,
-            )
+            if semaphore is None:
+                answer, tokens = await call_vllm_api(
+                    session=session,
+                    prompt=prompts[i],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop=["Question", "Assistant:", "<|separator|>"],
+                    url=base_url,
+                    seed=seed,
+                )
+            else:
+                async with semaphore:
+                    answer, tokens = await call_vllm_api(
+                        session=session,
+                        prompt=prompts[i],
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stop=["Question", "Assistant:", "<|separator|>"],
+                        url=base_url,
+                        seed=seed,
+                    )
             states[i] = answer
             output_tokens[i] = tokens
             return answer, tokens
 
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=600)
+            timeout=aiohttp.ClientTimeout(total=request_timeout_s)
         ) as session:
             tasks = [get_answer(session, i) for i in range(num_questions)]
             await tqdm.gather(*tasks, desc="Evaluating")
@@ -280,6 +299,12 @@ def main() -> None:
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Maximum number of concurrent requests. Default sends all requests.",
+    )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
@@ -292,6 +317,7 @@ def main() -> None:
         port=args.port,
         temperature=args.temperature,
         seed=args.seed,
+        max_concurrency=args.max_concurrency,
     )
 
     # Print results to terminal

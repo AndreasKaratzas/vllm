@@ -17,13 +17,9 @@ NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16]
 
-DTYPES = [torch.bfloat16]
-QDTYPES = (
-    [None, torch.float8_e4m3fn]
-    if not current_platform.is_rocm()
-    else [None, torch.float8_e4m3fnuz]
-)
 FP8_DTYPE = current_platform.fp8_dtype()
+DTYPES = [torch.bfloat16]
+QDTYPES = [None, FP8_DTYPE]
 
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check

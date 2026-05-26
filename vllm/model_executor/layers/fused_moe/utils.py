@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
     quant_dequant_mxfp6,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
@@ -311,10 +312,16 @@ def moe_kernel_quantize_input(
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
         if quantization_emulation:
-            raise NotImplementedError(
-                "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
-                "quantization emulation. Please open an issue."
+            qA, qA_scale = _mxfp8_e4m3_quantize(
+                A,
+                A_scale,
+                per_act_token_quant,
+                block_shape,
+                is_sf_swizzled_layout=False,
+                mx_alignment=mx_alignment,
             )
+            A = dequant_mxfp8_to_bf16(qA, qA_scale).to(A.dtype)
+            return A, None
         return _mxfp8_e4m3_quantize(
             A,
             A_scale,

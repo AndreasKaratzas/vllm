@@ -1463,9 +1463,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_hashes=mm_hashes,
             )
 
+        all_items_missing = all(
+            not item_is_cached
+            for modality_is_cached in mm_is_cached.values()
+            for item_is_cached in modality_is_cached
+        )
+
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
-        # items are combined with the cached multimodal items
+        # items are combined with the cached multimodal items. If every item
+        # is missing, the missing set is the full request, so newer HF
+        # processors can safely replace placeholders while processing text.
         with timing_ctx.record("apply_hf_processor"):
             (
                 prompt_ids,
@@ -1476,7 +1484,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_items=mm_missing_data_items,
                 hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
                 tokenization_kwargs=inputs.tokenization_kwargs,
-                enable_hf_prompt_update=False,
+                enable_hf_prompt_update=all_items_missing,
             )
 
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(

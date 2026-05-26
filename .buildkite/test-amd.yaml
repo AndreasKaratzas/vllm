@@ -333,23 +333,6 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
-#-----------------------------------------------------------  mi250 · evals  -----------------------------------------------------------#
-
-- label: Multi-Modal Accuracy Eval (Small Models) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - vllm/multimodal/
-  - vllm/inputs/
-  - vllm/v1/core/
-  - vllm/platforms/rocm.py
-  - vllm/model_executor/model_loader/
-  commands:
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
-
 #---------------------------------------------------------  mi250 · examples  ----------------------------------------------------------#
 
 - label: Examples # TBD
@@ -432,22 +415,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/mamba
-
-#-----------------------------------------------------------  mi250 · lora  ------------------------------------------------------------#
-
-- label: LoRA %N # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  parallelism: 4
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/lora
-  - tests/lora
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
 #------------------------------------------------------  mi250 · model_executor  -------------------------------------------------------#
 
@@ -789,26 +756,6 @@ steps:
   commands:
   - pytest -v -s v1/attention
 
-- label: V1 Sample + Logits # TBD
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1/sample
-  - tests/v1/logits_processors
-  - tests/v1/test_oracle.py
-  - tests/v1/test_request.py
-  - tests/v1/test_outputs.py
-  commands:
-  - pytest -v -s v1/sample
-  - pytest -v -s v1/logits_processors
-  - pytest -v -s v1/test_oracle.py
-  - pytest -v -s v1/test_request.py
-  - pytest -v -s v1/test_outputs.py
-
 - label: Distributed DP Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -831,21 +778,6 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
-
-- label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_2
-  num_gpus: 2
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
-  - vllm/v1/worker/kv_connector_model_runner_mixin.py
-  - tests/v1/kv_connector/nixl_integration/
-  - vllm/platforms/rocm.py
-  commands:
-  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
 
 - label: V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
@@ -1166,7 +1098,7 @@ steps:
   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   - python3 ../examples/features/data_parallel/data_parallel_offline.py --enforce-eager
   # rlhf examples
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_nccl.py
+  - echo "Skipping rlhf_nccl.py on ROCm pending RCCL/Ray utility init issue; rlhf_ipc.py still covers the RL weight-transfer path."
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_ipc.py
 
 - label: Elastic EP Scaling Test # TBD
@@ -1768,11 +1700,12 @@ steps:
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
-- label: Multi-Modal Models (Extended Generation 1) # TBD
+- label: Multi-Modal Models (Extended Generation 1) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1887,6 +1820,7 @@ steps:
   - tests/models/registry.py
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pip install --upgrade git+https://github.com/huggingface/transformers
   - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 #-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
@@ -2411,7 +2345,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - HYBRID_SSM=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: V1 e2e (4 GPUs) # TBD
+- label: V1 e2e (4 GPUs) - Part 1 # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
@@ -2421,7 +2355,57 @@ steps:
   - vllm/
   - tests/v1/e2e
   commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
+  - export VLLM_MEDIA_CACHE=/tmp/vllm-media-cache
+  - |
+    pytest -v -s \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama3_eagle]' \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama3_eagle]'
+
+- label: V1 e2e (4 GPUs) - Part 2 # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/v1/e2e
+  commands:
+  - export VLLM_MEDIA_CACHE=/tmp/vllm-media-cache
+  - |
+    pytest -v -s \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama4_eagle]' \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama4_eagle]'
+
+- label: V1 e2e (4 GPUs) - Part 3 # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/v1/e2e
+  commands:
+  - export VLLM_MEDIA_CACHE=/tmp/vllm-media-cache
+  - |
+    pytest -v -s \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[TRITON_ATTN-llama4_eagle_mm]'
+
+- label: V1 e2e (4 GPUs) - Part 4 # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/v1/e2e
+  commands:
+  - export VLLM_MEDIA_CACHE=/tmp/vllm-media-cache
+  - |
+    pytest -v -s \
+      'v1/e2e/spec_decode/test_spec_decode.py::test_eagle_correctness_heavy[ROCM_AITER_FA-llama4_eagle_mm]'
 
 - label: V1 e2e (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180

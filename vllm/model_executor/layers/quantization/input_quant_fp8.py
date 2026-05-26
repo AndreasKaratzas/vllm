@@ -158,6 +158,10 @@ class QuantFP8(CustomOp):
         if use_aiter_per_token_quant:
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
+        if self.is_group_quant and not current_platform.is_fp8_fnuz():
+            assert scale is None, "Dynamic group quantization does not use scale"
+            return torch.ops.vllm.triton_per_token_group_quant_fp8(x, self.group_size)
+
         # Fallback to native implementation for group quantization.
         if self.is_group_quant:
             assert scale is None, "Dynamic group quantization does not use scale"

@@ -29,10 +29,8 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
-from vllm.config import ModelConfig, SpeechToTextConfig, SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.tasks import ScoreType
 from vllm.utils.collection_utils import common_prefix
@@ -41,7 +39,9 @@ from vllm.utils.func_utils import supports_kw
 from .interfaces_base import VllmModel
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig, SpeechToTextConfig, SpeechToTextParams
     from vllm.config import VllmConfig
+    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
@@ -53,7 +53,11 @@ if TYPE_CHECKING:
         EncoderItemSpec,
     )
 else:
+    ModelConfig = Any
+    SpeechToTextConfig = Any
+    SpeechToTextParams = Any
     VllmConfig = object
+    MambaStateCopyFunc = Any
     WeightsMapper = object
     MultiModalFeatureSpec = object
     _ProcessorFactories = object

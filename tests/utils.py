@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import patch
 
 import anthropic
@@ -39,30 +39,25 @@ from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
 import vllm.envs as envs
-from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    _KernelT,
-    init_fp8_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
+
+if TYPE_CHECKING:
+    from tests.models.utils import TextTextLogprobs
+    from vllm.model_executor.kernels.linear import _KernelT
 
 logger = init_logger(__name__)
 
@@ -195,6 +190,9 @@ class RemoteVLLMServer:
         """Download model weights before starting the server to avoid timeout."""
         is_local = os.path.isdir(model)
         if not is_local:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.model_executor.model_loader import get_model_loader
+
             engine_args = AsyncEngineArgs.from_cli_args(args)
             model_config = engine_args.create_model_config()
             load_config = engine_args.create_load_config()
@@ -661,7 +659,7 @@ class RemoteVLLMServer:
 
     def url_for(self, *parts: str) -> str:
         path = "/".join(part.strip("/") for part in parts if part)
-        return f"{self.url_root}/{path}"
+        return f"{self.url_root}/{path}" if path else self.url_root
 
     def get_client(self, **kwargs):
         if "timeout" not in kwargs:
@@ -705,6 +703,8 @@ class RemoteOpenAIServer(RemoteVLLMServer):
     """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
 
     def _create_cli_subcommand(self):
+        from vllm.entrypoints.cli.serve import ServeSubcommand
+
         return ServeSubcommand()
 
     def _start_server(
@@ -734,6 +734,8 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
     """Launches ``vllm launch render`` for GPU-less serving tests."""
 
     def _create_cli_subcommand(self):
+        from vllm.entrypoints.cli.serve import ServeSubcommand
+
         return ServeSubcommand()
 
     def _start_server(
@@ -757,6 +759,9 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
         """Download only the tokenizer files (no model weights needed)."""
         is_local = os.path.isdir(model)
         if not is_local:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.tokenizers import get_tokenizer
+
             engine_args = AsyncEngineArgs.from_cli_args(args)
             model_config = engine_args.create_model_config()
             get_tokenizer(
@@ -1170,6 +1175,8 @@ def compare_all_settings(
             runner to avoid mixing model runner differences into correctness
             tests.
     """
+
+    from vllm.tokenizers import get_tokenizer
 
     if force_v1_runner:
         all_envs = [
@@ -1607,6 +1614,12 @@ def _format_subprocess_exit(returncode: int) -> str:
 _SPAWN_CHILD_ENV = "VLLM_TEST_SPAWN_CHILD"
 
 
+def _ensure_test_tmpdir() -> str:
+    tmpdir = tempfile.gettempdir()
+    os.makedirs(tmpdir, exist_ok=True)
+    return tmpdir
+
+
 def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to spawn a new process for each test function.
 
@@ -1634,7 +1647,9 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         if os.environ.get(_SPAWN_CHILD_ENV) == "1":
             return f(*args, **kwargs)
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tb", mode="wb") as tmp:
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=".tb", mode="wb", dir=_ensure_test_tmpdir()
+        ) as tmp:
             tb_file = tmp.name
 
         try:
@@ -1913,7 +1928,7 @@ def get_client_text_generations(completions: list[Completion]) -> list[str]:
 
 def get_client_text_logprob_generations(
     completions: list[Completion],
-) -> list[TextTextLogprobs]:
+) -> list["TextTextLogprobs"]:
     """Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
     each {class}`SequenceGroup`
@@ -2094,7 +2109,7 @@ class TestFP8Layer(torch.nn.Module):
         out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
         device: torch.device | None = None,
-        force_kernel: type[_KernelT] | None = None,
+        force_kernel: type["_KernelT"] | None = None,
     ):
         super().__init__()
         act_scale_desc = activation_quant_key.scale
@@ -2131,6 +2146,8 @@ class TestFP8Layer(torch.nn.Module):
             self.input_scale_ub = None
 
         out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
+
+        from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 
         self.kernel = init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,

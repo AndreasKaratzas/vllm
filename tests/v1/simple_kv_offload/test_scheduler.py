@@ -153,8 +153,6 @@ def make_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         cpu_capacity_bytes=cpu_capacity_bytes,
-        scheduler_block_size=BLOCK_SIZE,
-        hash_block_size=BLOCK_SIZE,
         lazy_offload=lazy,
     )
 

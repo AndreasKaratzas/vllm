@@ -134,6 +134,10 @@ def can_initialize(
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
     ):
+        # Keep EngineCore in this process so the patched KV-cache initializer
+        # above is used. This test is intended to validate model construction,
+        # not run a profiling forward pass.
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
         # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
         # L4 supports FA3.

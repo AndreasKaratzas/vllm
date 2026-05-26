@@ -51,6 +51,10 @@ from vllm.utils.import_utils import PlaceholderModule
 
 try:
     from datasets import load_dataset
+
+    from vllm.utils.hf_datasets import install_list_feature_compat
+
+    install_list_feature_compat()
 except ImportError:
     datasets = PlaceholderModule("datasets")
     load_dataset = datasets.placeholder_attr("load_dataset")
@@ -1823,8 +1827,16 @@ def _parse_range_ratio(value: str) -> RangeRatio:
 
 
 def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
-    if not hasattr(args, "request_id_prefix"):
-        args.request_id_prefix = ""
+    for attr, default in (
+        ("request_id_prefix", ""),
+        ("enable_multimodal_chat", False),
+        ("no_oversample", False),
+        ("skip_chat_template", False),
+    ):
+        if not hasattr(args, attr):
+            setattr(args, attr, default)
+    if not hasattr(args, "backend"):
+        args.backend = getattr(args, "endpoint_type", "openai")
 
     if hasattr(args, "random_range_ratio") and isinstance(args.random_range_ratio, str):
         args.random_range_ratio = _parse_range_ratio(args.random_range_ratio)

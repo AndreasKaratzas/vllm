@@ -14,6 +14,7 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
+from vllm.utils.flashinfer import has_flashinfer
 
 # CudaPlatform and RocmPlatform import their respective compiled C extensions
 # at module level, raising ModuleNotFoundError on incompatible builds.
@@ -449,6 +450,9 @@ def test_non_causal_backend_selection(
     any backend.
     """
     _cached_get_attn_backend.cache_clear()
+
+    if backend_name == "FLASHINFER" and not has_flashinfer():
+        pytest.skip("FlashInfer is not available")
 
     attention_config = AttentionConfig(
         backend=AttentionBackendEnum[backend_name],

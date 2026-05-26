@@ -30,7 +30,11 @@ logger = init_logger(__name__)
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # Triton MLA's decode path is still single-token only; spec-decode
+    # multi-token batches must use piecewise graphs instead of full graphs.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
 
 class TritonMLABackend(MLACommonBackend):

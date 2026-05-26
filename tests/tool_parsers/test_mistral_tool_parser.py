@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
-    StructuralTagResponseFormat,
+    LegacyStructuralTagResponseFormat,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall as VllmFunctionCall
 from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
@@ -1403,8 +1403,8 @@ def test_adjust_request_unsupported_response_format(
     mistral_tool_parser: MistralToolParser,
 ) -> None:
     request = _make_request(
-        response_format=StructuralTagResponseFormat(
-            type="structural_tag", format={"some": "config"}
+        response_format=LegacyStructuralTagResponseFormat(
+            type="structural_tag", structures=[], triggers=[]
         ),
     )
     result = mistral_tool_parser.adjust_request(request)

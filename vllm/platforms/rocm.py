@@ -119,6 +119,13 @@ def _sync_hip_cuda_env_vars():
 
     if hip_val is not None and cuda_val is not None:
         if hip_val != cuda_val:
+            if "RAY_JOB_ID" in os.environ:
+                # Ray's ROCm worker launcher updates HIP_VISIBLE_DEVICES for
+                # the assigned GPU but can leave CUDA_VISIBLE_DEVICES inherited
+                # from the driver. Treat the worker-local HIP assignment as
+                # authoritative so vLLM imports cleanly in Ray GPU actors.
+                os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
+                return
             raise ValueError(
                 f"Inconsistent GPU visibility env vars: "
                 f"HIP_VISIBLE_DEVICES='{hip_val}' vs "

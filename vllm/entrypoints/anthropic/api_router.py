@@ -6,6 +6,7 @@ from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
 
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
@@ -22,6 +23,7 @@ from vllm.entrypoints.utils import (
     load_aware_call,
     with_cancellation,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -42,6 +44,19 @@ def translate_error_response(response: ErrorResponse) -> JSONResponse:
     )
     return JSONResponse(
         status_code=response.error.code, content=anthropic_error.model_dump()
+    )
+
+
+def validation_error_response(error: Exception) -> JSONResponse:
+    anthropic_error = AnthropicErrorResponse(
+        error=AnthropicError(
+            type=HTTPStatus.BAD_REQUEST.phrase,
+            message=str(error),
+        )
+    )
+    return JSONResponse(
+        status_code=HTTPStatus.BAD_REQUEST.value,
+        content=anthropic_error.model_dump(),
     )
 
 
@@ -68,6 +83,9 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 
     try:
         generator = await handler.create_messages(request, raw_request)
+    except (ValidationError, VLLMValidationError) as e:
+        logger.debug("Validation error in create_messages: %s", e)
+        return validation_error_response(e)
     except Exception as e:
         logger.exception("Error in create_messages: %s", e)
         return JSONResponse(
@@ -114,6 +132,9 @@ async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Reques
 
     try:
         response = await handler.count_tokens(request, raw_request)
+    except (ValidationError, VLLMValidationError) as e:
+        logger.debug("Validation error in count_tokens: %s", e)
+        return validation_error_response(e)
     except Exception as e:
         logger.exception("Error in count_tokens: %s", e)
         return JSONResponse(

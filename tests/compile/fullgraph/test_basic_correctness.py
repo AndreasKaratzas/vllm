@@ -6,6 +6,7 @@ import pytest
 
 from vllm.config import CompilationMode
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import compare_all_settings
 
@@ -20,6 +21,18 @@ class TestSetting:
     tp_size: int
     attn_backend: str
     method: str
+
+
+def skip_rocm_gptq_dynamo_trace_once(
+    model_args: list[str], mode: CompilationMode
+) -> bool:
+    return (
+        current_platform.is_rocm()
+        and "--quantization" in model_args
+        and "gptq" in model_args
+        and mode == CompilationMode.DYNAMO_TRACE_ONCE
+        and not is_torch_equal_or_newer("2.11.0")
+    )
 
 
 # we cannot afford testing the full Cartesian product
@@ -132,6 +145,9 @@ def test_compile_correctness(
         CompilationMode.DYNAMO_TRACE_ONCE,
         CompilationMode.VLLM_COMPILE,
     ]:
+        if skip_rocm_gptq_dynamo_trace_once(model_args, comp_mode):
+            continue
+
         for mode in [CompilationMode.NONE, comp_mode]:
             all_args.append(
                 final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
@@ -156,6 +172,9 @@ def test_compile_correctness(
         CompilationMode.DYNAMO_TRACE_ONCE,
         CompilationMode.VLLM_COMPILE,
     ]:
+        if skip_rocm_gptq_dynamo_trace_once(model_args, mode):
+            continue
+
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
         all_envs.append({})
 

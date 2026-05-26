@@ -297,7 +297,7 @@ class ElasticEPScalingState:
                 return False
             if self.new_dp_group.rank() == 0:
                 self.new_dp_store.delete_key("eep_barrier_engine_count")
-            self._eplb_reshuffle()
+            self._finish_scale_up()
             self.state = ScaleUpExistingEngineState.COMPLETE
             self._update_parallel_config()
             return True
@@ -352,7 +352,7 @@ class ElasticEPScalingState:
             ):
                 return False
             assert self.new_dp_group.rank() > 0
-            self._eplb_reshuffle()
+            self._finish_scale_up()
             self.state = ScaleUpNewEngineState.COMPLETE
             return True
 
@@ -528,11 +528,20 @@ class ElasticEPScalingState:
         self.engine_core.engines_running = bool(data[0])
         self.engine_core.current_wave = int(data[1])
         self.engine_core.step_counter = int(data[2])
+        self._reset_prefix_cache_after_topology_change()
         if new_dp_group.rank() == 0:
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.RECONFIGURE_FINISHED
             )
             logger.info("[Elastic EP] Switched to new setup")
+
+    def _reset_prefix_cache_after_topology_change(self):
+        reset_successful = self.engine_core.reset_prefix_cache()
+        if not reset_successful:
+            logger.warning(
+                "[Elastic EP] Failed to reset prefix cache after topology change; "
+                "cached KV blocks may be stale"
+            )
 
     def _eplb_reshuffle(self):
         self.model_executor.collective_rpc(
@@ -546,6 +555,14 @@ class ElasticEPScalingState:
         assert self.new_dp_group is not None
         if self.new_dp_group.rank() == 0:
             logger.info("[Elastic EP] EPLB reshuffle completed")
+
+    def _finish_scale_up(self):
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute", args=("finish_scale_up",)
+        )
+        assert self.new_dp_group is not None
+        if self.new_dp_group.rank() == 0:
+            logger.info("[Elastic EP] Scale-up EPLB state initialized")
 
     def _eplb_reshuffle_before_scale_down(self):
         assert self.reconfig_request is not None and self.old_dp_group is not None

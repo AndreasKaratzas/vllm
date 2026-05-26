@@ -1034,19 +1034,32 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             self.static_input_scales = False
 
+        def _select_mxfp4_backend(
+            activation_key: Any | None = None,
+        ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+            try:
+                return select_mxfp4_moe_backend(moe, activation_key=activation_key)
+            except NotImplementedError as e:
+                logger.warning_once(
+                    "No native OCP MX MoE backend is available; using "
+                    "emulation. Selector error: %s",
+                    str(e),
+                )
+                return Mxfp4MoeBackend.EMULATION, None
+
         # Select backend based on OCP MX scheme
         if self.ocp_mx_scheme == "w_mxfp4":
             # W4A16: weight-only MXFP4
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+            self.mxfp4_backend, self.experts_cls = _select_mxfp4_backend()
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
             # W4A8: MXFP4 weights + static FP8 activations
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kFp8StaticTensorSym
+            self.mxfp4_backend, self.experts_cls = _select_mxfp4_backend(
+                activation_key=kFp8StaticTensorSym
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
             # W4A4: MXFP4 weights + MXFP4 activations
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp4Dynamic
+            self.mxfp4_backend, self.experts_cls = _select_mxfp4_backend(
+                activation_key=kMxfp4Dynamic
             )
 
         # Validation for unsupported schemes

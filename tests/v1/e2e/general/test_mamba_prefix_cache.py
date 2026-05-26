@@ -51,6 +51,8 @@ MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 BLOCK_SIZE = 560
 DEVICE_TYPE = current_platform.device_type
 NUM_HIDDEN_LAYERS = 1
+MAX_MODEL_LEN = 16384
+GPU_MEMORY_UTILIZATION = 0.2
 cur_step_action_idx = 0
 cur_step_action: StepAction | None = None
 step_actions: list[StepAction] = []
@@ -399,6 +401,8 @@ def _run_ref_mamba_state_worker():
         engine = LLM(
             model=MODEL,
             block_size=BLOCK_SIZE,
+            max_model_len=MAX_MODEL_LEN,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
             hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
             seed=42,
         )
@@ -737,6 +741,8 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             "num_speculative_tokens": num_speculative_tokens,
         },
         max_num_batched_tokens=3072,
+        max_model_len=MAX_MODEL_LEN,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
         seed=42,
     )

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import lm_eval
 import pytest
+import torch
 from packaging import version
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and version.parse(
@@ -52,6 +53,10 @@ TEST_CONFIGS = {
 
 @pytest.mark.parametrize("model_name, accuracy_numbers", TEST_CONFIGS.items())
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 4,
+    reason="mixed-precision accuracy configs require tensor_parallel_size=4",
+)
 def test_mixed_precision_model_accuracies(model_name: str, accuracy_numbers: dict):
     results = lm_eval.simple_evaluate(
         model="vllm",

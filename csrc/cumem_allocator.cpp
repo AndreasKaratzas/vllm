@@ -46,6 +46,59 @@ static inline unsigned long long my_min(unsigned long long a,
   return a < b ? a : b;
 }
 
+static CUresult reserve_rocm_address(CUdeviceptr* d_mem, ssize_t size,
+                                     size_t alignment) {
+  // Some ROCm stacks can report OOM while reserving VA with an explicit
+  // alignment even when physical VRAM is free. Prefer HIP's default alignment
+  // and only retry the explicit alignment if the default path fails.
+  CUresult status = cuMemAddressReserve(d_mem, size, 0, 0, 0);
+  if (status == CUresult(0) || alignment == 0) {
+    return status;
+  }
+
+  return cuMemAddressReserve(d_mem, size, alignment, 0, 0);
+}
+
+static CUresult reserve_rocm_address_at(CUdeviceptr d_mem, ssize_t size) {
+  CUdeviceptr d_mem_new = 0;
+  CUresult status = cuMemAddressReserve(&d_mem_new, size, 0, d_mem, 0);
+  if (status != CUresult(0)) {
+    return status;
+  }
+  if (d_mem_new == d_mem) {
+    return CUresult(0);
+  }
+
+  cuMemAddressFree(d_mem_new, size);
+  std::cerr << "ROCm: VA re-reserve got " << (void*)d_mem_new << " instead of "
+            << (void*)d_mem << std::endl;
+  return hipErrorInvalidValue;
+}
+
+static CUresult cycle_reserved_address(CUdeviceptr d_mem, ssize_t size) {
+  // ROCm workaround: hipMemRelease does not return physical VRAM to the free
+  // pool while the virtual-address reservation is still held. During sleep we
+  // need to keep the same VA available for wake_up, so free and re-reserve it.
+  CUresult status = cuMemAddressFree(d_mem, size);
+  if (status != CUresult(0)) {
+    return status;
+  }
+
+  status = reserve_rocm_address_at(d_mem, size);
+  if (status != CUresult(0)) {
+    CUresult restore_status = reserve_rocm_address_at(d_mem, size);
+    if (restore_status != CUresult(0)) {
+      std::cerr << "ROCm: failed to restore VA reservation at " << (void*)d_mem
+                << " after cycling it; aborting to avoid dangling GPU pointers"
+                << std::endl;
+      std::abort();
+    }
+    return status;
+  }
+
+  return CUresult(0);
+}
+
 static const char* PYARGS_PARSE = "KKKO";
 #endif
 
@@ -59,6 +112,11 @@ extern "C" {
 char error_msg[10240];  // 10KB buffer to store error messages
 CUresult no_error = CUresult(0);
 CUresult error_code = no_error;  // store error code
+
+void clear_error_state() {
+  error_code = no_error;
+  error_msg[0] = '\0';
+}
 
 #define CUDA_CHECK(condition)                                           \
   do {                                                                  \
@@ -297,6 +355,7 @@ PyObject* create_tuple_from_c_mixed(unsigned long long a, unsigned long long b,
 
 // use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void* my_malloc(ssize_t size, int device, CUstream stream) {
+  clear_error_state();
   ensure_context(device);
 
   // first allocation, align the size, and reserve an address, and also allocate
@@ -325,7 +384,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
     return nullptr;
   }
 #else
-  CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, granularity, 0, 0));
+  CUDA_CHECK(reserve_rocm_address(&d_mem, alignedSize, granularity));
   if (error_code != 0) {
     return nullptr;
   }
@@ -428,6 +487,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 
 // use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
+  clear_error_state();
   // get memory handle from the pointer
   if (!g_python_free_callback) {
     std::cerr << "ERROR: g_python_free_callback not set.\n";
@@ -443,10 +503,28 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   PyObject* py_result =
       PyObject_CallFunctionObjArgs(g_python_free_callback, py_ptr, NULL);
 
-  if (!py_result || !PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
+  if (!py_result) {
+    PyErr_Print();
+    Py_DECREF(py_ptr);
+    PyGILState_Release(gstate);
+    return;
+  }
+
+  if (py_result == Py_None) {
+    Py_DECREF(py_result);
+    Py_DECREF(py_ptr);
+    PyGILState_Release(gstate);
+
+    CUDA_CHECK(cuMemAddressFree(reinterpret_cast<CUdeviceptr>(ptr), size));
+    return;
+  }
+
+  if (!PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
+    PyErr_Print();
     Py_XDECREF(py_result);
     Py_XDECREF(py_ptr);
+    PyGILState_Release(gstate);
     return;
   }
 
@@ -463,6 +541,7 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
     // PyArg_ParseTuple sets an error if it fails
     Py_XDECREF(py_result);
     Py_XDECREF(py_ptr);
+    PyGILState_Release(gstate);
     return;
   }
 
@@ -564,6 +643,7 @@ static PyObject* py_init_module(PyObject* self, PyObject* args) {
 }
 
 static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
+  clear_error_state();
   if (!args || !PyTuple_Check(args) || PyTuple_Size(args) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
     return nullptr;
@@ -648,6 +728,13 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle, chunk_sizes,
                     num_chunks);
 
+  if (error_code == no_error) {
+    CUresult status = cycle_reserved_address(d_mem_ptr, recv_size);
+    if (status != no_error) {
+      CUDA_CHECK(status);
+    }
+  }
+
   free(p_memHandle);
   free(chunk_sizes);
 #endif
@@ -662,6 +749,7 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
 }
 
 static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
+  clear_error_state();
   if (!args || !PyTuple_Check(args) || PyTuple_Size(args) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
     return nullptr;

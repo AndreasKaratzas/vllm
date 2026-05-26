@@ -3,14 +3,18 @@
 
 from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 from packaging.version import Version
-from transformers import PretrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
+from transformers.configuration_utils import PretrainedConfig
 
-from vllm.config.model import ModelDType, TokenizerMode
+if TYPE_CHECKING:
+    from vllm.config.model import ModelDType, TokenizerMode
+else:
+    ModelDType = str
+    TokenizerMode = str
 
 
 @dataclass(frozen=True)
@@ -336,6 +340,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         trust_remote_code=True,
+        max_transformers_version="5.8.0",
+        transformers_version_reason={
+            "hf": (
+                "HyperCLOVAX remote HF code is incompatible with Transformers "
+                "5.9: its rotary embedding setup expects a removed "
+                "ROPE_INIT_FUNCTIONS['default'] entry."
+            ),
+        },
     ),
     "InternLMForCausalLM": _HfExamplesInfo(
         "internlm/internlm-chat-7b", trust_remote_code=True
@@ -419,7 +431,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
     "MiniCPM4ForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM4.1-8B", trust_remote_code=True
+        "openbmb/MiniCPM4.1-8B",
+        trust_remote_code=True,
+        max_transformers_version="5.8.0",
+        transformers_version_reason={
+            "hf": (
+                "MiniCPM4.1 remote HF code is incompatible with Transformers "
+                "5.9: it imports removed utilities and its generation path no "
+                "longer provides a valid HF reference."
+            ),
+        },
     ),
     "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(
@@ -834,7 +855,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Salesforce/blip2-opt-2.7b",
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
     ),
-    "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),
+    "ChameleonForConditionalGeneration": _HfExamplesInfo(
+        "facebook/chameleon-7b",
+        is_available_online=False,
+    ),
     "Cheers": _HfExamplesInfo(
         "ai9stars/Cheers",
         trust_remote_code=True,
@@ -863,6 +887,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Eagle2_5_VLForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Eagle2.5-8B",
+        is_available_online=False,
         trust_remote_code=True,
     ),
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
@@ -1367,7 +1392,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
     ),
-    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),
+    "TarsierForConditionalGeneration": _HfExamplesInfo(
+        "omni-research/Tarsier-7b",
+        is_available_online=False,
+    ),
     "Tarsier2ForConditionalGeneration": _HfExamplesInfo(
         "omni-research/Tarsier2-Recap-7b",
         hf_overrides={

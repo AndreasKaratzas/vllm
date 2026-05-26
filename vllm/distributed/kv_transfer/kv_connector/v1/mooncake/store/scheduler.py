@@ -171,9 +171,7 @@ class MooncakeStoreScheduler:
         preempted_ids = scheduler_output.preempted_req_ids or set()
         self._preempted_req_ids.update(preempted_ids)
         for req_id in preempted_ids:
-            self.load_specs.pop(req_id, None)
-            if request_tracker := self._request_trackers.get(req_id):
-                request_tracker.reset()
+            self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
@@ -357,10 +355,8 @@ class MooncakeStoreScheduler:
         if self.kv_role == "kv_consumer":
             return False, None
         tracker = self._request_trackers.get(request.request_id)
-        # Missing tracker can happen when the request is aborted before the
-        # connector observes the normal finished lifecycle or is preempted
-        # before finishing.
-        if tracker is None or tracker.num_saved_tokens <= 0:
+        assert tracker is not None
+        if tracker.num_saved_tokens <= 0:
             return False, None
         total_blocks = sum(len(g) for g in block_ids)
         delay_free_blocks = total_blocks > 0

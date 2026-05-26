@@ -5,8 +5,11 @@ import requests
 from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B"
+MODEL_NAME = (
+    "Qwen/Qwen3-0.6B" if current_platform.is_rocm() else "meta-llama/Llama-3.2-1B"
+)
 
 
 def test_sleep_mode():
@@ -14,12 +17,25 @@ def test_sleep_mode():
     args = [
         "--dtype",
         "bfloat16",
-        "--max-model-len",
-        "8192",
-        "--max-num-seqs",
-        "128",
         "--enable-sleep-mode",
     ]
+    if current_platform.is_rocm():
+        args.extend([
+            "--max-model-len",
+            "1024",
+            "--max-num-seqs",
+            "16",
+            "--gpu-memory-utilization",
+            "0.05",
+            "--enforce-eager",
+        ])
+    else:
+        args.extend([
+            "--max-model-len",
+            "8192",
+            "--max-num-seqs",
+            "128",
+        ])
 
     with RemoteOpenAIServer(
         MODEL_NAME,
