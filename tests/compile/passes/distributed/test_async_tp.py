@@ -40,6 +40,7 @@ FP8_DTYPE = current_platform.fp8_dtype()
 def has_cutlass_scaled_mm() -> bool:
     return hasattr(torch.ops._C, "cutlass_scaled_mm")
 
+
 prompts = [
     "Hello, my name is",
     "The president of the United States is",
@@ -239,8 +240,20 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         TestAGMMModel,
         TestScaledMMRSModel,
         TestAGScaledMMModel,
-        TestCutlassScaledMMRSModel,
-        TestAGCutlassScaledMMModel,
+        pytest.param(
+            TestCutlassScaledMMRSModel,
+            marks=pytest.mark.skipif(
+                not hasattr(torch.ops._C, "cutlass_scaled_mm"),
+                reason="Requires cutlass_scaled_mm",
+            ),
+        ),
+        pytest.param(
+            TestAGCutlassScaledMMModel,
+            marks=pytest.mark.skipif(
+                not hasattr(torch.ops._C, "cutlass_scaled_mm"),
+                reason="Requires cutlass_scaled_mm",
+            ),
+        ),
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
