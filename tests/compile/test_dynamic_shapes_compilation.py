@@ -61,7 +61,10 @@ def test_dynamic_shapes_compilation(
     if shapes_type == DynamicShapesType.UNBACKED and not is_torch_equal_or_newer(
         "2.11.0"
     ):
-        pytest.skip("unbacked dynamic shapes require PyTorch 2.11+")
+        pytest.skip(
+            "vLLM's shape_id-based unbacked dynamic shape path "
+            "requires PyTorch 2.11+"
+        )
 
     # TODO is this still a requirement?
     if evaluate_guards and use_aot_compile:

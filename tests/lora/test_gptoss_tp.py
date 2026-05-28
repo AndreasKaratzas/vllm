@@ -51,10 +51,13 @@ def _supports_gpt_oss_mxfp4_lora_tp() -> bool:
     if not current_platform.is_rocm():
         return False
 
-    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm._aiter_ops import is_aiter_found_and_supported
     from vllm.platforms.rocm import on_gfx950
 
-    return on_gfx950() and rocm_aiter_ops.is_fused_moe_enabled()
+    # Only gate on hard capability at collection time. The ROCm AITER env
+    # toggles are forced inside the test so CI exercises this path when the
+    # hardware and package can support it.
+    return on_gfx950() and is_aiter_found_and_supported()
 
 
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
@@ -127,7 +130,7 @@ def test_gpt_oss_lora(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(
     not _supports_gpt_oss_mxfp4_lora_tp(),
-    reason="GPT-OSS MXFP4 LoRA TP requires CUDA or ROCm gfx950 with AITER MoE.",
+    reason="GPT-OSS MXFP4 LoRA TP requires CUDA or ROCm gfx950 with AITER.",
 )
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @pytest.mark.parametrize("mxfp4_use_marlin", MXFP4_USE_MARLIN_PARAMS)
@@ -137,23 +140,38 @@ def test_gpt_oss_lora_tp2(
     fully_sharded_loras,
     mxfp4_use_marlin,
 ):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_MXFP4_USE_MARLIN", "1" if mxfp4_use_marlin else "0")
-        llm = vllm.LLM(
-            MODEL_PATH,
-            max_model_len=1024,
-            enable_lora=True,
-            max_loras=2,
-            max_num_seqs=2,
-            max_num_batched_tokens=2048,
-            tensor_parallel_size=2,
-            gpu_memory_utilization=0.8,
-            fully_sharded_loras=fully_sharded_loras,
-            enable_expert_parallel=not fully_sharded_loras,
-            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-                cudagraph_specialize_lora=False,
-            ),
-        )
+    rocm_aiter_ops = None
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
 
-        generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-        generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+    try:
+        with monkeypatch.context() as m:
+            if rocm_aiter_ops is not None:
+                # AITER caches env flags at import time; refresh after forcing
+                # the toggles so ROCm gfx950 runs cannot be skipped by CI env.
+                m.setenv("VLLM_ROCM_USE_AITER", "1")
+                m.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+                rocm_aiter_ops.refresh_env_variables()
+
+            m.setenv("VLLM_MXFP4_USE_MARLIN", "1" if mxfp4_use_marlin else "0")
+            llm = vllm.LLM(
+                MODEL_PATH,
+                max_model_len=1024,
+                enable_lora=True,
+                max_loras=2,
+                max_num_seqs=2,
+                max_num_batched_tokens=2048,
+                tensor_parallel_size=2,
+                gpu_memory_utilization=0.8,
+                fully_sharded_loras=fully_sharded_loras,
+                enable_expert_parallel=not fully_sharded_loras,
+                compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+                    cudagraph_specialize_lora=False,
+                ),
+            )
+
+            generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+            generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+    finally:
+        if rocm_aiter_ops is not None:
+            rocm_aiter_ops.refresh_env_variables()
