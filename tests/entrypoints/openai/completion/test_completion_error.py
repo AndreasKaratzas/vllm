@@ -302,6 +302,30 @@ def test_json_schema_response_format_missing_schema():
         )
 
 
+@pytest.mark.parametrize("format_value", [None, {}])
+def test_structural_tag_response_format_invalid(format_value):
+    """Malformed structural tags should be rejected during request validation."""
+    with pytest.raises(Exception, match="Invalid response_format structural_tag"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            response_format={"type": "structural_tag", "format": format_value},
+        )
+
+
+@pytest.mark.parametrize("structural_tag", ["not json", ""])
+def test_structured_outputs_structural_tag_invalid(structural_tag):
+    """Malformed direct structured_outputs structural tags should be rejected."""
+    with pytest.raises(Exception, match="Invalid structured_outputs structural_tag"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            structured_outputs={"structural_tag": structural_tag},
+        )
+
+
 def test_negative_prompt_token_ids_nested():
     """Negative token IDs in prompt (nested list) should raise validation error."""
     with pytest.raises(Exception, match="greater than or equal to 0"):
