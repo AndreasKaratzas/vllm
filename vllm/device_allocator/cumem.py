@@ -18,6 +18,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.system_utils import find_loaded_library
 
@@ -53,6 +54,7 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    is_mapped: bool = True
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -65,7 +67,7 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 
 def get_pluggable_allocator(
     python_malloc_fn: Callable[[HandleType], None],
-    python_free_func: Callable[[int], HandleType],
+    python_free_func: Callable[[int], HandleType | None],
 ) -> torch.cuda.memory.CUDAPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
     new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
@@ -77,12 +79,25 @@ def get_pluggable_allocator(
 @contextmanager
 def use_memory_pool_with_allocator(
     python_malloc_fn: Callable[[HandleType], None],
-    python_free_func: Callable[[int], HandleType],
+    python_free_func: Callable[[int], HandleType | None],
 ) -> Iterator[
     tuple[torch.cuda.memory.MemPool, torch.cuda.memory.CUDAPluggableAllocator]
 ]:
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
+    if current_platform.is_rocm():
+        # PyTorch's public use_mem_pool context releases the HIP pool when the
+        # context exits. CuMemAllocator intentionally keeps MemPool alive after
+        # the context so sleep/wake bookkeeping remains valid, and the later
+        # destructor can crash if the pool was already released.
+        device = torch.cuda.current_device()
+        torch.cuda.memory._cuda_beginAllocateCurrentThreadToPool(device, mem_pool.id)
+        try:
+            yield mem_pool, new_alloc
+        finally:
+            torch.cuda.memory._cuda_endAllocateToPool(device, mem_pool.id)
+        return
+
     with torch.cuda.memory.use_mem_pool(mem_pool):
         yield mem_pool, new_alloc
 
@@ -131,6 +146,7 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
+        self.released_unmapped_pointers: set[int] = set()
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
@@ -153,13 +169,24 @@ class CuMemAllocator:
         )
         return
 
-    def _python_free_callback(self, ptr: int) -> HandleType:
+    def _python_free_callback(self, ptr: int) -> HandleType | None:
         """
         Internal method to look up the allocation data
         when memory is freed in the memory pool."""
-        data = self.pointer_to_data.pop(ptr)
+        data = self.pointer_to_data.pop(ptr, None)
+        if data is None:
+            if ptr in self.released_unmapped_pointers:
+                self.released_unmapped_pointers.remove(ptr)
+                logger.debug(
+                    "Freed VA-only allocation for address %s from cumem allocator",
+                    ptr,
+                )
+                return None
+            raise KeyError(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
+        if not data.is_mapped:
+            return None
         # Drain pending kernels before the C extension's cuMemUnmap.
         # The pluggable allocator path doesn't defer reclaim like the
         # regular caching allocator, so without this, in-flight work
@@ -192,6 +219,9 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        if current_platform.is_rocm():
+            torch.cuda.synchronize()
+
         total_bytes = 0
         backup_bytes = 0
 
@@ -211,6 +241,7 @@ class CuMemAllocator:
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+            data.is_mapped = False
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -223,6 +254,8 @@ class CuMemAllocator:
 
         gc.collect()
         torch.cuda.empty_cache()
+        if current_platform.is_rocm():
+            torch.cuda.synchronize()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
@@ -234,10 +267,13 @@ class CuMemAllocator:
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.
         """
+        if current_platform.is_rocm():
+            torch.cuda.synchronize()
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
+                data.is_mapped = True
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
@@ -247,6 +283,8 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+        if current_platform.is_rocm():
+            torch.cuda.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
@@ -300,8 +338,11 @@ class CuMemAllocator:
                 allocations = data[0].snapshot()
                 for allocation in allocations:
                     if allocation["allocated_size"] == 0:
-                        handle = self._python_free_callback(allocation["address"])
-                        unmap_and_release(handle)
+                        address = allocation["address"]
+                        handle = self._python_free_callback(address)
+                        if handle is not None:
+                            unmap_and_release(handle)
+                        self.released_unmapped_pointers.add(address)
         finally:
             self.current_tag = old_tag
             if expandable_was_enabled:

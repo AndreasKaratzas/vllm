@@ -450,6 +450,12 @@ def test_non_causal_backend_selection(
     """
     _cached_get_attn_backend.cache_clear()
 
+    if current_platform.is_rocm():
+        if backend_name == "FLASH_ATTN":
+            pytest.skip("CUDA FlashAttention backend is not available on ROCm")
+        if backend_name == "FLASHINFER":
+            pytest.skip("FlashInfer backend is not available on ROCm")
+
     attention_config = AttentionConfig(
         backend=AttentionBackendEnum[backend_name],
         use_non_causal=use_non_causal,
