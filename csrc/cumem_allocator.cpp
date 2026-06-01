@@ -46,6 +46,19 @@ static inline unsigned long long my_min(unsigned long long a,
   return a < b ? a : b;
 }
 
+static CUresult reserve_rocm_address(CUdeviceptr* d_mem, ssize_t size,
+                                     size_t alignment) {
+  CUresult status = cuMemAddressReserve(d_mem, size, alignment, 0, 0);
+  if (status == CUresult(0) || alignment == 0) {
+    return status;
+  }
+
+  // Some ROCm stacks can report OOM while reserving VA with an explicit
+  // alignment even when physical VRAM is free. Let HIP choose the default
+  // alignment before surfacing the failure.
+  return cuMemAddressReserve(d_mem, size, 0, 0, 0);
+}
+
 static const char* PYARGS_PARSE = "KKKO";
 #endif
 
@@ -325,7 +338,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
     return nullptr;
   }
 #else
-  CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, granularity, 0, 0));
+  CUDA_CHECK(reserve_rocm_address(&d_mem, alignedSize, granularity));
   if (error_code != 0) {
     return nullptr;
   }
