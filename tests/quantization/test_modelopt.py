@@ -25,6 +25,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -178,10 +179,10 @@ def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(down_proj.quant_method, ModelOptFp8LinearMethod)
 
             # Check weight dtype is FP8
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            assert qkv_proj.weight.dtype == current_platform.fp8_dtype()
+            assert o_proj.weight.dtype == current_platform.fp8_dtype()
+            assert gate_up_proj.weight.dtype == current_platform.fp8_dtype()
+            assert down_proj.weight.dtype == current_platform.fp8_dtype()
 
             # Check scales are present and have correct dtype
             assert hasattr(qkv_proj, "weight_scale")
@@ -242,10 +243,10 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(gate_up_proj.quant_method, ModelOptFp8PcPtLinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8PcPtLinearMethod)
 
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            assert qkv_proj.weight.dtype == current_platform.fp8_dtype()
+            assert o_proj.weight.dtype == current_platform.fp8_dtype()
+            assert gate_up_proj.weight.dtype == current_platform.fp8_dtype()
+            assert down_proj.weight.dtype == current_platform.fp8_dtype()
 
             # Per-channel scales; activations are dynamically scaled per token.
             assert hasattr(qkv_proj, "weight_scale")
@@ -305,10 +306,10 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(gate_up_proj.quant_method, ModelOptFp8PbWoLinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8PbWoLinearMethod)
 
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            assert qkv_proj.weight.dtype == current_platform.fp8_dtype()
+            assert o_proj.weight.dtype == current_platform.fp8_dtype()
+            assert gate_up_proj.weight.dtype == current_platform.fp8_dtype()
+            assert down_proj.weight.dtype == current_platform.fp8_dtype()
 
             # Block scales; should be materialized as a 2D [out_blk, in_blk] tensor.
             assert hasattr(qkv_proj, "weight_scale")
@@ -481,7 +482,10 @@ def test_modelopt_mixed_precision_dispatches_w4a16_layer(
     config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
 
     fake_layer = MagicMock(spec=LinearBase)
-    method = config.get_quant_method(fake_layer, "model.layers.0.fake_proj")
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.MarlinNvFp4LinearKernel"
+    ):
+        method = config.get_quant_method(fake_layer, "model.layers.0.fake_proj")
 
     expected_cls = getattr(m, expected_linear_cls_name)
     assert isinstance(method, expected_cls), (

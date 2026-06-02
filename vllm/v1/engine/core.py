@@ -2106,7 +2106,9 @@ class EngineCoreActorMixin:
             value = get_device_indices(
                 device_control_env_var, local_dp_rank, world_size
             )
-            os.environ[device_control_env_var] = value
+            from vllm.platforms import current_platform
+
+            os.environ.update(current_platform.get_device_control_env_var_updates(value))
         except IndexError as e:
             raise Exception(
                 f"Error setting {device_control_env_var}: "

@@ -4,6 +4,7 @@
 import atexit
 import os
 import random
+import socket
 
 import pytest
 import torch
@@ -32,6 +33,9 @@ def distributed_run(fn, world_size, *args):
     number_of_processes = world_size
     processes: list[mp.Process] = []
     skip_queue: mp.SimpleQueue = mp.SimpleQueue()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        master_port = str(sock.getsockname()[1])
     for i in range(number_of_processes):
         env: dict[str, str] = {}
         env["RANK"] = str(i)
@@ -39,7 +43,7 @@ def distributed_run(fn, world_size, *args):
         env["WORLD_SIZE"] = str(number_of_processes)
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
-        env["MASTER_PORT"] = "12345"
+        env["MASTER_PORT"] = master_port
         p = mp.Process(
             target=_distributed_worker_wrapper,
             args=(fn, env, world_size, args, i, skip_queue),

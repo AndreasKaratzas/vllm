@@ -316,11 +316,9 @@ class RayDistributedExecutor(Executor):
         #    unset.
         # Each worker will use local_rank to index into the visible devices.
         all_args_to_update_environment_variables = [
-            {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
+            current_platform.get_device_control_env_var_updates(
+                ",".join(map(str, node_gpus[node_id]))
+            )
             for (node_id, _) in worker_node_and_gpu_ids
         ]
 

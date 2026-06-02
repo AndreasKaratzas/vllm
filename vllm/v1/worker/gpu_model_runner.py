@@ -43,6 +43,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_ep_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -3283,6 +3284,17 @@ class GPUModelRunner(
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
             num_valid_physical_experts=old_num_physical_experts,
+        )
+        num_physical_experts = expanded_physical_to_logical.shape[1]
+        ep_world_size = get_ep_group().world_size
+        if num_physical_experts % ep_world_size != 0:
+            raise ValueError(
+                f"Expanded physical expert count ({num_physical_experts}) "
+                f"must be divisible by EP world size ({ep_world_size}).")
+        num_local_physical_experts = num_physical_experts // ep_world_size
+        self._moe_model.update_physical_experts_metadata(
+            num_physical_experts=num_physical_experts,
+            num_local_physical_experts=num_local_physical_experts,
         )
 
     def _pool(

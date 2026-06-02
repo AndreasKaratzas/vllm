@@ -5,7 +5,7 @@ from mistral_common.protocol.instruct.chunk import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
 from transformers import BatchFeature, ProcessorMixin, TensorType
-from transformers.image_utils import ImageInput
+from transformers.image_utils import ImageInput, is_valid_image, load_image
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -18,6 +18,18 @@ class MistralCommonImageProcessor:
 
     def __init__(self, mm_encoder: ImageEncoder) -> None:
         self.mm_encoder = mm_encoder
+
+    def fetch_images(self, image_url_or_urls):
+        if isinstance(image_url_or_urls, list):
+            return [self.fetch_images(x) for x in image_url_or_urls]
+        if isinstance(image_url_or_urls, str):
+            return load_image(image_url_or_urls)
+        if is_valid_image(image_url_or_urls):
+            return image_url_or_urls
+        raise TypeError(
+            "only a single image input or a list of image inputs is "
+            f"supported, but got type={type(image_url_or_urls)}"
+        )
 
     def __call__(
         self,

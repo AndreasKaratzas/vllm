@@ -343,7 +343,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             weight_type=self.quant_config.quant_type,
             act_type=params_dtype if input_dtype is None else input_dtype,
             group_size=self.quant_config.group_size,
-            zero_points=False,
+            zero_points=not self.quant_config.is_sym,
             has_g_idx=self.quant_config.desc_act,
         )
 

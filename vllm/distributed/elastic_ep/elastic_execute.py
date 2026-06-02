@@ -56,6 +56,39 @@ if TYPE_CHECKING:
     )
 
 
+_NON_TRANSFERABLE_MOE_RUNTIME_STATE_SUFFIXES = (
+    "_expert_map",
+    "expert_map",
+    "expert_mask",
+    "expert_global_to_physical",
+    "expert_physical_to_global",
+    "expert_local_to_global",
+)
+
+
+def _is_non_transferable_moe_runtime_state(name: str) -> bool:
+    return name.endswith(_NON_TRANSFERABLE_MOE_RUNTIME_STATE_SUFFIXES)
+
+
+def _iter_transferable_state_tensors(
+    model: nn.Module,
+    expert_weights: Sequence[Iterable[torch.Tensor]],
+) -> list[tuple[str, torch.Tensor]]:
+    expert_weights_set = set()
+    for weight_group in expert_weights:
+        for weight in weight_group:
+            expert_weights_set.add(weight.data_ptr())
+
+    transferable_tensors: list[tuple[str, torch.Tensor]] = []
+    for name, param in model.state_dict().items():
+        if _is_non_transferable_moe_runtime_state(name):
+            continue
+        if param.data_ptr() not in expert_weights_set:
+            transferable_tensors.append((name, param.data))
+
+    return sorted(transferable_tensors, key=lambda item: item[0])
+
+
 def batch_transfer_weights(
     model: nn.Module,
     is_sender: bool,
@@ -67,19 +100,13 @@ def batch_transfer_weights(
     if device_comm is None:
         raise ValueError("No device communicator found")
 
-    expert_weights_set = set()
-    for weight_group in expert_weights:
-        for weight in weight_group:
-            expert_weights_set.add(weight.data_ptr())
-
-    state_dict = model.state_dict()
-    all_params = []
-
-    for name, param in state_dict.items():
-        if name.endswith("expert_map"):
-            continue
-        if param.data_ptr() not in expert_weights_set:
-            all_params.append(param.data)
+    all_params = [
+        tensor
+        for _, tensor in _iter_transferable_state_tensors(
+            model=model,
+            expert_weights=expert_weights,
+        )
+    ]
 
     assert len(all_params) > 0
     p2p_ops = []

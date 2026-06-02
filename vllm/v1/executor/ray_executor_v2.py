@@ -384,11 +384,9 @@ class RayExecutorV2(MultiprocExecutor):
         init_worker_refs = []
         for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(i)
-            worker_env_vars = {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
+            worker_env_vars = current_platform.get_device_control_env_var_updates(
+                ",".join(map(str, node_gpus[node_id]))
+            )
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
                 self.ray_worker_handles[i].actor.initialize_worker.remote(

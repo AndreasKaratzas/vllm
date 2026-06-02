@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -49,6 +50,7 @@ requires_deep_ep = pytest.mark.skipif(
 )
 
 MAX_TOKENS_PER_RANK = 64
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def make_weights(
@@ -63,7 +65,7 @@ def make_weights(
         return w1, w2, None, None
 
     # per-out-channel weight quantization
-    assert dtype == torch.float8_e4m3fn
+    assert dtype == FP8_DTYPE
     w1 = torch.empty((e, 2 * n, k), device="cuda", dtype=torch.float16)
     w2 = torch.empty((e, k, n), device="cuda", dtype=torch.float16)
 
@@ -104,10 +106,8 @@ class TestTensors:
     @staticmethod
     def make(config: TestConfig, low_latency_mode: bool) -> "TestTensors":
         # TODO (varun) - check that float16 works ?
-        assert config.dtype in [torch.bfloat16, torch.float8_e4m3fn]
-        token_dtype = (
-            torch.bfloat16 if config.dtype == torch.float8_e4m3fn else config.dtype
-        )
+        assert config.dtype in [torch.bfloat16, FP8_DTYPE]
+        token_dtype = torch.bfloat16 if config.dtype == FP8_DTYPE else config.dtype
         rank_tokens = (
             torch.randn((config.m, config.k), device="cuda", dtype=token_dtype) / 10
         )
@@ -215,10 +215,10 @@ def deep_ep_moe_impl(
         return expert_map.to(device=device, dtype=torch.int32)
 
     hidden_size = test_tensors.rank_tokens.size(1)
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == FP8_DTYPE
     q_dtype = None
     if is_quantized:
-        q_dtype = torch.float8_e4m3fn
+        q_dtype = FP8_DTYPE
 
     out_hidden_states = torch.empty_like(test_tensors.rank_tokens)
     total_num_tokens = test_tensors.rank_tokens.size(0)
@@ -317,7 +317,7 @@ def torch_moe_impl(
             .to(a.dtype)
         )
 
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == FP8_DTYPE
     a_dtype = a.dtype
     if is_quantized:
         w1 = w1.to(dtype=torch.float32) * w1_scale
@@ -366,7 +366,7 @@ def _deep_ep_moe(
             "FP8 dispatch interface is available only in low-latency mode"
         )
 
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == FP8_DTYPE
     device_idx = torch.accelerator.current_device_index()
     w1 = w1.to(device=device_idx)
     w2 = w2.to(device=device_idx)
@@ -434,7 +434,7 @@ MNKs = [
     (222, 1024, 2048),
 ]
 
-DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
+DTYPES = [torch.bfloat16, FP8_DTYPE]
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -489,7 +489,7 @@ MNKs = [
     (64, 1024, 2560),
     (222, 1024, 2560),
 ]
-DTYPES = [torch.float8_e4m3fn, torch.bfloat16]
+DTYPES = [FP8_DTYPE, torch.bfloat16]
 USE_FP8_DISPATCH = [True, False]
 
 

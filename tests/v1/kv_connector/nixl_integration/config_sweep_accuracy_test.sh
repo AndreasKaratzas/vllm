@@ -82,7 +82,16 @@ run_tests() {
 # Set backend
 label="default backend"
 cmdline_args=""
-if [[ -n "${ROCM_ATTN:-}" ]]; then
+# Prefer the generic backend knob when callers set multiple legacy flags.
+if [[ -n "${ATTENTION_BACKEND:-}" ]]; then
+  if [[ "${ATTENTION_BACKEND,,}" == "auto" ]]; then
+    echo "ATTENTION_BACKEND=auto is set, running with default attention backend"
+  else
+    echo "ATTENTION_BACKEND is set, running with --attention-backend ${ATTENTION_BACKEND}"
+    label="${ATTENTION_BACKEND} backend"
+    cmdline_args=" --attention-backend ${ATTENTION_BACKEND} "
+  fi
+elif [[ -n "${ROCM_ATTN:-}" ]]; then
   echo "ROCM_ATTN is set, running with --attention-backend ROCM_ATTN"
   label="ROCM_ATTN backend"
   cmdline_args=" --attention-backend ROCM_ATTN "

@@ -111,6 +111,16 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     return r
 
 
+def _visible_devices_subset(lhs: str, rhs: str) -> bool:
+    lhs_devices = [dev.strip() for dev in lhs.split(",") if dev.strip()]
+    rhs_devices = [dev.strip() for dev in rhs.split(",") if dev.strip()]
+    return bool(lhs_devices) and set(lhs_devices).issubset(rhs_devices)
+
+
+def _in_ray_worker() -> bool:
+    return "RAY_JOB_ID" in os.environ
+
+
 def _sync_hip_cuda_env_vars():
     """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent.
     Treats empty string as unset. Raises on genuine conflicts."""
@@ -119,6 +129,13 @@ def _sync_hip_cuda_env_vars():
 
     if hip_val is not None and cuda_val is not None:
         if hip_val != cuda_val:
+            if _in_ray_worker():
+                if _visible_devices_subset(hip_val, cuda_val):
+                    os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
+                    return
+                if _visible_devices_subset(cuda_val, hip_val):
+                    os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
+                    return
             raise ValueError(
                 f"Inconsistent GPU visibility env vars: "
                 f"HIP_VISIBLE_DEVICES='{hip_val}' vs "
@@ -420,6 +437,9 @@ class RocmPlatform(Platform):
     dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    device_control_env_var_aliases: list[str] = [
+        "HIP_VISIBLE_DEVICES",
+    ]
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",

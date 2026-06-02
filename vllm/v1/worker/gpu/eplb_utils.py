@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm.distributed import get_ep_group
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
@@ -152,5 +153,16 @@ class EPLBController:
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
             num_valid_physical_experts=old_num_physical_experts,
+        )
+        num_physical_experts = expanded_physical_to_logical.shape[1]
+        ep_world_size = get_ep_group().world_size
+        if num_physical_experts % ep_world_size != 0:
+            raise ValueError(
+                f"Expanded physical expert count ({num_physical_experts}) "
+                f"must be divisible by EP world size ({ep_world_size}).")
+        num_local_physical_experts = num_physical_experts // ep_world_size
+        model.update_physical_experts_metadata(
+            num_physical_experts=num_physical_experts,
+            num_local_physical_experts=num_local_physical_experts,
         )
         self._has_registered_models = True

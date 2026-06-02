@@ -14,6 +14,8 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
+from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # CudaPlatform and RocmPlatform import their respective compiled C extensions
 # at module level, raising ModuleNotFoundError on incompatible builds.
@@ -438,6 +440,10 @@ def test_per_head_quant_scales_backend_selection(
         ("FLASHINFER", False, True),  # FlashInfer works with causal
     ],
 )
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="FlashInfer and FlashAttention selector cases are CUDA-only.",
+)
 def test_non_causal_backend_selection(
     backend_name: str, use_non_causal: bool, should_succeed: bool
 ):
@@ -449,6 +455,11 @@ def test_non_causal_backend_selection(
     any backend.
     """
     _cached_get_attn_backend.cache_clear()
+
+    if backend_name == "FLASHINFER" and not has_flashinfer():
+        pytest.skip("FlashInfer is not available")
+    if backend_name == "FLASH_ATTN" and get_flash_attn_version() is None:
+        pytest.skip("FlashAttention is not available")
 
     attention_config = AttentionConfig(
         backend=AttentionBackendEnum[backend_name],

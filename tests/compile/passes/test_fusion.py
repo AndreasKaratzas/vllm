@@ -308,6 +308,13 @@ def test_fusion_rmsnorm_quant(
 ):
     force_kernel, group_shape = kernel_groupshape
 
+    if current_platform.is_rocm() and group_shape.is_per_group():
+        pytest.skip(
+            "Regular RMSNormQuantFusionPass does not register ROCm blockwise "
+            "group-quant patterns; ROCm group quant is covered by the "
+            "AITER-specific fusion tests."
+        )
+
     if not enable_quant_fp8_custom_op and group_shape.is_per_group():
         pytest.skip("Unsupported unwrapped quant fp8 op for blockwise quantization")
 

@@ -1563,12 +1563,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         Currently, only decode is supported for full cudagraphs with MLA.
         """
         m = common_attn_metadata
-        assert m.num_reqs <= (m.num_actual_tokens * self.reorder_batch_threshold), (
+        num_decodes, num_prefills, _, _ = split_decodes_and_prefills(
+            m,
+            decode_threshold=self.reorder_batch_threshold,
+            require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
+        )
+        assert num_decodes == m.num_reqs and num_prefills == 0, (
             "MLA only supports decode-only full CUDAGraph capture. "
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
-
-        assert m.max_query_len <= self.reorder_batch_threshold  # decode only
 
         return self.build(0, m)
 

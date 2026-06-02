@@ -43,10 +43,6 @@ if ROCM_AVAILABLE:
     ROCM_GFX950 = on_gfx950()
     ROCM_AITER_AVAILABLE = rocm_aiter_ops.is_enabled()
 
-    if ROCM_AITER_AVAILABLE:
-        from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (
         fp4_quantize,
@@ -72,6 +68,12 @@ class ModelCase:
     tp: int
 
 
+LLAMA4_MXFP4_FIXTURE_SKIP_REASON = (
+    "HF fixture has invalid attn_temperature_tuning metadata under "
+    "huggingface_hub strict config validation"
+)
+
+
 @pytest.fixture(scope="function", autouse=True)
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
@@ -83,7 +85,12 @@ def enable_pickle(monkeypatch):
     [
         ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
         ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-        ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
+        pytest.param(
+            ModelCase(
+                "fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1
+            ),
+            marks=pytest.mark.skip(reason=LLAMA4_MXFP4_FIXTURE_SKIP_REASON),
+        ),
         ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
         ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
     ],
@@ -1267,7 +1274,7 @@ def test_rocm_mxfp4_moe_oracle(
 
     This test validates that the oracle functions work end-to-end:
     - select_mxfp4_moe_backend() selects a valid backend
-    - convert_to_mxfp4_moe_kernel_format() converts weights without error
+    - convert_weight_to_mxfp4_moe_kernel_format() converts weights without error
     - make_mxfp4_moe_quant_config() builds a valid quant config
     - make_mxfp4_moe_kernel() creates a kernel that runs without error
     - The kernel output is within accuracy tolerance of reference
@@ -1281,13 +1288,18 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
+    try:
+        from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+    except ImportError as e:
+        pytest.skip(f"aiter MXFP4 quant helpers required for oracle setup: {e}")
 
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
         backend_to_kernel_cls,
-        convert_to_mxfp4_moe_kernel_format,
+        convert_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_kernel,
         make_mxfp4_moe_quant_config,
     )
@@ -1387,7 +1399,7 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Convert weights using oracle
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
-        convert_to_mxfp4_moe_kernel_format(
+        convert_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
             layer=layer,  # type: ignore[arg-type]
             w13_weight=w13_quant,
@@ -1423,7 +1435,6 @@ def test_rocm_mxfp4_moe_oracle(
             mxfp4_backend=backend,
             experts_cls=experts_cls,
             routing_tables=None,
-            shared_experts=None,
         )
 
         # Create inputs

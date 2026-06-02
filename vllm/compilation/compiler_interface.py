@@ -207,6 +207,19 @@ def is_compile_cache_enabled(
     )
 
 
+def _is_standalone_compiled_artifact_saveable(compiled_artifact: Any) -> bool:
+    is_saveable = getattr(compiled_artifact, "is_saveable", None)
+    if callable(is_saveable):
+        return bool(is_saveable())
+
+    artifacts = getattr(compiled_artifact, "_artifacts", None)
+    if artifacts is None:
+        return False
+
+    _, cache_info = artifacts
+    return len(cache_info.aot_autograd_artifacts) == 1
+
+
 def _patch_standalone_compile_atomic_save() -> None:
     """Backport of pytorch/pytorch#162432 for torch < 2.10.0.
 
@@ -389,26 +402,15 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert key is not None
         path = os.path.join(self.cache_dir, key)
 
-        def is_saveable_2_10(compiled_artifact):
-            # can just use compiled_artifact.is_saveable in 2.11
-            if compiled_artifact._artifacts is None:
-                return False
-            _, cache_info = compiled_artifact._artifacts
-            return len(cache_info.aot_autograd_artifacts) == 1
-
         if is_compile_cache_enabled(compiler_config):
-            if not is_saveable_2_10(compiled_graph):
-                raise RuntimeError(
-                    "The compiled artifact is not serializable. This usually means "
-                    "that the model code has something that is not serializable "
-                    "by torch.compile in it. You can fix this by either "
-                    "figuring out what is not serializable and rewriting it, "
-                    "filing a bug report, "
-                    "or suppressing this error by "
-                    "disabling vLLM's compilation cache via "
-                    "VLLM_DISABLE_COMPILE_CACHE=1 "
-                    "(this will greatly increase vLLM server warm start times)."
+            if not _is_standalone_compiled_artifact_saveable(compiled_graph):
+                logger.warning_once(
+                    "Skipping vLLM torch.compile cache save for a standalone "
+                    "Inductor artifact that PyTorch cannot serialize. Execution "
+                    "will continue, but this graph will be recompiled on the "
+                    "next warm start."
                 )
+                return compiled_graph, None
             compiled_graph.save(path=path, format=self.save_format)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)

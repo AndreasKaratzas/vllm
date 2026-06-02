@@ -3,6 +3,8 @@
 
 import logging
 import os
+import pickle
+from copy import deepcopy
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -28,7 +30,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, replace
 from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
     OptimizationLevel,
@@ -65,6 +67,39 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+def test_v2_model_runner_resolution_is_stable_after_config_update(monkeypatch):
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(
+        architectures=["Qwen3ForCausalLM"],
+        enable_prompt_embeds=False,
+        enable_return_routed_experts=False,
+        has_inner_state=False,
+        is_moe=False,
+        is_quantized=False,
+        logits_processors=None,
+        logprobs_mode="processed_logprobs",
+        runner_type="generate",
+    )
+
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
+    config._use_v2_model_runner = config._resolve_use_v2_model_runner()
+
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+
+    assert config.use_v2_model_runner is False
+    assert pickle.loads(pickle.dumps(config)).use_v2_model_runner is False
+    assert deepcopy(config).use_v2_model_runner is False
+
+    config.__dict__.pop("model_config", None)
+    monkeypatch.setattr(
+        VllmConfig, "_resolve_use_v2_model_runner", lambda self: True
+    )
+    replaced = replace(config, cache_config=config.cache_config)
+    assert replaced.use_v2_model_runner is False
 
 
 @pytest.mark.parametrize(

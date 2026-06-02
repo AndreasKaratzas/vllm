@@ -397,7 +397,7 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, repack_w_q)
         self._transform_param(layer, self.w_s_name, repack_w_s)
 
-        if self.w_zp_name is not None:
+        if self.config.zero_points and self.w_zp_name is not None:
             zp = getattr(layer, self.w_zp_name, None)
             if zp is not None:
                 # Checkpoint: [N//8, K//G] int32 (N packed at dim 0, K//G at dim 1)
@@ -413,6 +413,8 @@ class TritonW4A16LinearKernel(MPLinearKernel):
     ) -> torch.Tensor:
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        if not c.zero_points:
+            w_zp = None
 
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)

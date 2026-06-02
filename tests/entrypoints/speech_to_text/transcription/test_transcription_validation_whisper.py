@@ -31,7 +31,6 @@ def _get_attention_backend_params() -> list[str | None]:
               falls back to ROCM_AITER_UNIFIED_ATTN or TRITON_ATTN for
               cross-attention since ROCM_ATTN doesn't support ENCODER_DECODER)
       - TRITON_ATTN: always available on ROCm
-      - ROCM_AITER_UNIFIED_ATTN: only on gfx942/gfx950
 
     On non-ROCm platforms, we just run with the default backend.
     """
@@ -39,12 +38,7 @@ def _get_attention_backend_params() -> list[str | None]:
         from vllm.platforms import current_platform
 
         if current_platform.is_rocm():
-            backends: list[str | None] = [None, "TRITON_ATTN"]
-            from vllm.platforms.rocm import _ON_MI3XX
-
-            if _ON_MI3XX:
-                backends.append("ROCM_AITER_UNIFIED_ATTN")
-            return backends
+            return [None, "TRITON_ATTN"]
     except Exception:
         pass
     return [None]

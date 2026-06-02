@@ -122,6 +122,7 @@ class Platform:
     # hint: search for "get_visible_accelerator_ids_env_var" in
     # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
     device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
+    device_control_env_var_aliases: list[str] = []
 
     # environment variables that need to be set to 1 to prevent ray from
     # setting the visible devices e.g.
@@ -171,6 +172,14 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
+
+    def get_device_control_env_vars(self) -> list[str]:
+        env_vars = [self.device_control_env_var]
+        env_vars.extend(self.device_control_env_var_aliases)
+        return list(dict.fromkeys(env_vars))
+
+    def get_device_control_env_var_updates(self, value: str) -> dict[str, str]:
+        return {env_var: value for env_var in self.get_device_control_env_vars()}
 
     def uses_host_device_handling(self) -> bool:
         """Whether vLLM should leave DeviceConfig.device unset."""

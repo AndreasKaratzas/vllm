@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.multimodal.image import rescale_image_size
+from vllm.platforms import current_platform
 
 from ...conftest import IMAGE_ASSETS, ImageTestAssets, VllmRunner
 from ..utils import check_logprobs_close
@@ -96,7 +97,18 @@ def run_awq_test(
 @pytest.mark.parametrize(
     ("model", "quantization", "dtype"),
     [
-        ("mattbucci/gemma-4-26B-AWQ", "awq", "float16"),
+        pytest.param(
+            "mattbucci/gemma-4-26B-AWQ",
+            "awq",
+            "float16",
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason=(
+                    "Gemma4 AWQ MoE uses GELU_TANH, while ROCm WNA16 MoE "
+                    "currently supports SiLU only."
+                ),
+            ),
+        ),
         ("cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit", "compressed-tensors", "bfloat16"),
     ],
     ids=[

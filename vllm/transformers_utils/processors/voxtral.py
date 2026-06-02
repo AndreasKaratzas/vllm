@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from mistral_common.tokens.tokenizers.audio import AudioEncoder
 from transformers import BatchFeature, ProcessorMixin, TensorType
-from transformers.audio_utils import AudioInput
+from transformers.audio_utils import AudioInput, is_valid_audio, load_audio
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -28,6 +28,18 @@ class MistralCommonFeatureExtractor:
     @property
     def frame_rate(self):
         return self.audio_encoder.audio_config.frame_rate
+
+    def fetch_audio(self, audio_url_or_urls):
+        if isinstance(audio_url_or_urls, list):
+            return [self.fetch_audio(x) for x in audio_url_or_urls]
+        if isinstance(audio_url_or_urls, str):
+            return load_audio(audio_url_or_urls)
+        if is_valid_audio(audio_url_or_urls):
+            return audio_url_or_urls
+        raise TypeError(
+            "only a single audio input or a list of audio inputs is "
+            f"supported, but got type={type(audio_url_or_urls)}"
+        )
 
     def __call__(
         self,

@@ -441,7 +441,9 @@ def _run_fused_moe_lora_one_shot(
     # MoE intermediate) keep the work_per_expert heuristic: BLOCK_K=128
     # would force the EVEN_K=False masked path and add no K-loop savings
     # (K/64=3 vs K/128=2 masked) while inflating per-program startup.
-    if K >= 256:
+    if current_platform.is_rocm():
+        block_k = 64
+    elif K >= 256:
         block_k = 128
     else:
         work_per_expert = topk_weights.numel() / max(num_experts, 1)

@@ -37,6 +37,7 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 ) >= version.parse(QUARK_MXFP4_MIN_VERSION)
 
 DEVICE_TYPE = current_platform.device_type
+QWEN_MOE_MXFP4_MODEL = "fxmarty/qwen_1.5-moe-a2.7b-mxfp4"
 
 if QUARK_MXFP4_AVAILABLE:
     from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
@@ -231,7 +232,7 @@ WIKITEXT_ACCURACY_CONFIGS = [
         excepted_value=10.6,
     ),
     AccuracyTestConfig(
-        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.4
+        model_name=QWEN_MOE_MXFP4_MODEL, excepted_value=12.4
     ),
 ]
 
@@ -255,12 +256,14 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     task = "wikitext"
     rtol = 0.1
 
+    engine_kwargs = {"cudagraph_capture_sizes": [16]}
+    if config.model_name == QWEN_MOE_MXFP4_MODEL and not current_platform.supports_mx():
+        engine_kwargs["moe_backend"] = "emulation"
+
     # Smaller cudagraph_capture_sizes to speed up the test.
     results = lm_eval.simple_evaluate(
         model="vllm",
-        model_args=config.get_model_args(
-            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
-        ),
+        model_args=config.get_model_args(tp_size=tp_size, kwargs=engine_kwargs),
         tasks=task,
         batch_size=64,
     )

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import lm_eval
 import pytest
+import torch
 from packaging import version
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and version.parse(
@@ -29,11 +30,13 @@ class ModelCase:
 @dataclass
 class EvaluationConfig:
     model_name: str
+    tensor_parallel_size: int
 
     def get_model_args(self) -> str:
         return (
             f"pretrained={self.model_name},"
-            "tensor_parallel_size=4,dtype=auto,gpu_memory_utilization=0.8,trust_remote_code=False"
+            f"tensor_parallel_size={self.tensor_parallel_size},"
+            "dtype=auto,gpu_memory_utilization=0.8,trust_remote_code=False"
         )
 
 
@@ -53,9 +56,14 @@ TEST_CONFIGS = {
 @pytest.mark.parametrize("model_name, accuracy_numbers", TEST_CONFIGS.items())
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
 def test_mixed_precision_model_accuracies(model_name: str, accuracy_numbers: dict):
+    device_count = torch.accelerator.device_count()
+    if device_count == 0:
+        pytest.skip("This test requires at least one accelerator.")
+    tensor_parallel_size = min(4, device_count)
+
     results = lm_eval.simple_evaluate(
         model="vllm",
-        model_args=EvaluationConfig(model_name).get_model_args(),
+        model_args=EvaluationConfig(model_name, tensor_parallel_size).get_model_args(),
         tasks=list(accuracy_numbers.keys()),
         batch_size=8,
     )

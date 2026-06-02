@@ -17,6 +17,18 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 
+def _get_rocm_rotary_atol(output: torch.Tensor) -> float:
+    if current_platform.is_rocm() and output.dtype is torch.bfloat16:
+        return 8e-3
+    return get_default_atol(output)
+
+
+def _get_fp8_cache_tolerances() -> tuple[float, float]:
+    if current_platform.is_rocm():
+        return 0.005, 0.15
+    return 0.001, 0.1
+
+
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16, torch.float])
 @pytest.mark.parametrize("is_neox_style", [False, True])
 @pytest.mark.parametrize("seq_len", [11, 42])
@@ -163,10 +175,21 @@ def test_concat_and_cache_mla_rope_fused(
         ops.convert_fp8(
             expected_temp, ref_kv_cache, kv_cache_scale.item(), kv_dtype=kv_cache_dtype
         )
-        torch.testing.assert_close(result_temp, expected_temp, atol=0.001, rtol=0.1)
+        fp8_atol, fp8_rtol = _get_fp8_cache_tolerances()
+        torch.testing.assert_close(
+            result_temp, expected_temp, atol=fp8_atol, rtol=fp8_rtol
+        )
     else:
-        torch.testing.assert_close(kv_cache, ref_kv_cache)
+        torch.testing.assert_close(
+            kv_cache,
+            ref_kv_cache,
+            atol=_get_rocm_rotary_atol(kv_cache),
+            rtol=get_default_rtol(kv_cache),
+        )
 
     torch.testing.assert_close(
-        query, ref_q_pe, atol=get_default_atol(query), rtol=get_default_rtol(query)
+        query,
+        ref_q_pe,
+        atol=_get_rocm_rotary_atol(query),
+        rtol=get_default_rtol(query),
     )

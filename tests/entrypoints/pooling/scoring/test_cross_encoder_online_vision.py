@@ -19,7 +19,6 @@ HF_OVERRIDES = {
 }
 
 ROCM_ATTN_BACKENDS = [
-    "ROCM_ATTN",
     "ROCM_AITER_FA",
     "TRITON_ATTN",
     "FLEX_ATTENTION",
@@ -32,7 +31,6 @@ BACKEND_TOL: dict[str, float] = {
     "default": 0.05,  # 5% tolerance for other backends (e.g. FLASH_ATTN)
     # Relaxed tolerances for ROCm attn
     # See: https://github.com/vllm-project/vllm/issues/35569
-    "ROCM_ATTN": 0.09,  # gfx950:~8.45%, gfx942:~3.70%
     "ROCM_AITER_FA": 0.045,  # gfx950:~2.00%, gfx942:~0.80%
     "TRITON_ATTN": 0.045,  # gfx950:~3.00%, gfx942:~2.20%
     "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%

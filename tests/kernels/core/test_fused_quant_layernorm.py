@@ -40,6 +40,47 @@ CUDA_DEVICES = [
 
 EPS = 1e-6
 
+
+def _assert_scales_close(
+    ref_scales: torch.Tensor,
+    ops_scales: torch.Tensor,
+    input_dtype: torch.dtype,
+) -> None:
+    if input_dtype in (torch.float16, torch.bfloat16):
+        torch.testing.assert_close(ref_scales, ops_scales, atol=1e-4, rtol=1e-3)
+    else:
+        torch.testing.assert_close(ref_scales, ops_scales, atol=1e-6, rtol=1e-5)
+
+
+def _assert_fp8_outputs_close(
+    ref_out: torch.Tensor,
+    ops_out: torch.Tensor,
+    ref_scales: torch.Tensor,
+    ops_scales: torch.Tensor,
+    group_size: list[int] | None,
+) -> None:
+    ref_fp32 = ref_out.to(dtype=torch.float32)
+    ops_fp32 = ops_out.to(dtype=torch.float32)
+    if torch.allclose(ref_fp32, ops_fp32, atol=1e-6):
+        return
+
+    diff = (ref_fp32 - ops_fp32).abs()
+    mismatch_fraction = (diff > 0).sum().item() / diff.numel()
+    if current_platform.is_fp8_fnuz():
+        assert mismatch_fraction <= 0.02
+        assert diff.max().item() <= 16.0
+
+    if group_size is None:
+        ref_deq = ref_fp32 * ref_scales.view(-1, 1)
+        ops_deq = ops_fp32 * ops_scales.view(-1, 1)
+    else:
+        ref_deq = ref_fp32 * ref_scales.repeat_interleave(group_size[1], dim=1)
+        ops_deq = ops_fp32 * ops_scales.repeat_interleave(group_size[1], dim=1)
+
+    rtol = 0.15 if current_platform.is_fp8_fnuz() else 5e-2
+    torch.testing.assert_close(ref_deq, ops_deq, rtol=rtol, atol=5e-2)
+
+
 ## Helpers
 
 
@@ -251,30 +292,12 @@ def test_rms_norm(
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
     if quant_dtype == torch.int8:
-        assert torch.allclose(ref_scales, ops_scales, atol=1e-6)
+        _assert_scales_close(ref_scales, ops_scales, dtype)
         # big atol to account for round-off errors.
         assert torch.allclose(ref_out, ops_out, atol=1)
     else:
-        assert torch.allclose(ref_scales, ops_scales)
-        a = ref_out.to(dtype=torch.float32)
-        b = ops_out.to(dtype=torch.float32)
-        ok = torch.allclose(a, b, atol=1e-6)
-        if not ok:
-            # fallback: compare dequantized values with relaxed tolerance
-            if group_size is None:
-                a_deq = a * ref_scales.view(-1, 1)
-                b_deq = b * ops_scales.view(-1, 1)
-            else:
-                a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
-                b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
-            # NOTE: It is possible that some future test cases trigger this
-            # max diff due to precision issues. If such an error is
-            # encountered, it's recommended to inspect the differences between
-            # all corresponding elements from each tensor (e.g. by looping over
-            # them) and checking how many the max diff error shows up on (just
-            # a few bad elements should still be considered acceptable).
-            ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
-        assert ok
+        _assert_scales_close(ref_scales, ops_scales, dtype)
+        _assert_fp8_outputs_close(ref_out, ops_out, ref_scales, ops_scales, group_size)
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual)
 

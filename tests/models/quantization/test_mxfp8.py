@@ -20,6 +20,8 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
+from vllm.platforms import current_platform
+
 from ..utils import check_logprobs_close
 
 # A small MoE model that fits on a single GPU and has both linear + MoE layers.
@@ -30,6 +32,11 @@ DENSE_MODEL = "Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN = 1024
 MAX_TOKENS = 4
 NUM_LOG_PROBS = 8
+
+
+def _skip_if_mxfp8_moe_backend_unavailable(model: str) -> None:
+    if model == MOE_MODEL and current_platform.is_rocm():
+        pytest.skip("Online MXFP8 MoE backend is not available on ROCm.")
 
 
 @pytest.mark.skipif(
@@ -51,6 +58,8 @@ def test_mxfp8_logprobs(
     are close.  Only 4 tokens are generated to keep the test fast while
     still catching numerical divergence.
     """
+    _skip_if_mxfp8_moe_backend_unavailable(model)
+
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
 
@@ -89,6 +98,7 @@ def test_mxfp8_logprobs(
 @pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
 def test_mxfp8_generation(vllm_runner, model: str) -> None:
     """Smoke test: verify online MXFP8 model generates coherent text."""
+    _skip_if_mxfp8_moe_backend_unavailable(model)
     prompt = "1 2 3 4 5"
     with vllm_runner(
         model,

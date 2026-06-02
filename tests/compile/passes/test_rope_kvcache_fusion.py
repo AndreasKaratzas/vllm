@@ -319,10 +319,16 @@ def test_rope_kvcache_fusion(
         torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
-        # Cannot compare fp8_* directly here, cast to model dtype instead
+        cache_atol, cache_rtol = (
+            (0.125, 0.125) if kv_cache_dtype.startswith("fp8") else (ATOL, RTOL)
+        )
+        # Cannot compare fp8_* directly here; convert to model dtype instead
+        # of reinterpreting the raw fp8 bytes as bf16/fp16 words. FP8 cache
+        # payloads may differ by one representable bin across fused/unfused
+        # update paths.
         torch.testing.assert_close(
-            kv_cache_unfused.view(dtype),
-            kv_cache_fused.view(dtype),
-            atol=ATOL,
-            rtol=RTOL,
+            kv_cache_unfused.to(dtype),
+            kv_cache_fused.to(dtype),
+            atol=cache_atol,
+            rtol=cache_rtol,
         )

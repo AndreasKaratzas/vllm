@@ -16,7 +16,7 @@ from statistics import mean, median
 import pytest
 import soundfile
 import torch
-from datasets import load_dataset
+from datasets import Audio, load_dataset
 from evaluate import load
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
@@ -36,6 +36,16 @@ def to_bytes(y, sr):
     soundfile.write(buffer, y, sr, format="WAV")
     buffer.seek(0)
     return buffer
+
+
+def get_audio_array(audio):
+    if "array" in audio:
+        return audio["array"], audio["sampling_rate"]
+
+    if audio["bytes"] is not None:
+        return soundfile.read(io.BytesIO(audio["bytes"]), dtype="float32")
+
+    return soundfile.read(audio["path"], dtype="float32")
 
 
 # not all models have a normalizer so use the one from whisper as a standard option
@@ -89,12 +99,12 @@ async def process_dataset(model, client, data, concurrent_request):
     )
 
     # Warmup call as the first `load_audio` server-side is quite slow.
-    audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
+    audio, sr = get_audio_array(data[0]["audio"])
     _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "")
 
     tasks: list[asyncio.Task] = []
     for sample in data:
-        audio, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
+        audio, sr = get_audio_array(sample["audio"])
         task = asyncio.create_task(
             bound_transcribe(sem, client, tokenizer, (audio, sr), sample["text"])
         )
@@ -121,7 +131,7 @@ def print_performance_metrics(results, total_time):
 
 
 def add_duration(sample):
-    y, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
+    y, sr = get_audio_array(sample["audio"])
     sample["duration_ms"] = get_audio_duration(y=y, sr=sr) * 1000
     return sample
 
@@ -129,7 +139,8 @@ def add_duration(sample):
 def load_hf_dataset(dataset_repo: str, split="validation", **hf_kwargs):
     ## Load and filter the dataset
     dataset = load_dataset(dataset_repo, split=split, **hf_kwargs)
-    if "duration_ms" not in dataset[0]:
+    dataset = dataset.cast_column("audio", Audio(decode=False))
+    if "duration_ms" not in dataset.column_names:
         # compute duration to filter
         dataset = dataset.map(add_duration)
 
@@ -172,7 +183,7 @@ def run_evaluation(
     [
         ("openai/whisper-large-v3", 12.744980),
         # CohereASR is used to test the variable encoder length code paths
-        ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        ("CohereLabs/cohere-transcribe-03-2026", 12.769027),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.

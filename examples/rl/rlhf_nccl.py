@@ -29,6 +29,7 @@ causes unexpected behavior.
 import os
 
 import ray
+import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
@@ -44,6 +45,16 @@ from vllm.utils.network_utils import get_ip, get_open_port
 MODEL_NAME = "facebook/opt-125m"
 # MODEL_NAME = "inference-optimization/Qwen3-0.6B-W4A16-G128"
 
+if torch.version.hip is not None:
+    os.environ.setdefault("RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES", "1")
+    os.environ.setdefault("RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES", "1")
+    os.environ.setdefault("RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES", "1")
+
+
+def _ray_gpu_index() -> int:
+    assigned_gpus = ray.get_runtime_context().get_accelerator_ids().get("GPU", [])
+    return int(assigned_gpus[0]) if assigned_gpus else 0
+
 
 class MyLLM(LLM):
     """Configure the vLLM worker for Ray placement group execution."""
@@ -58,9 +69,11 @@ class TrainModel:
     """Ray actor that wraps the training model on a dedicated GPU."""
 
     def __init__(self, model_name: str):
+        device_index = _ray_gpu_index()
+        torch.accelerator.set_device_index(device_index)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-        ).to("cuda:0")
+        ).to(f"cuda:{device_index}")
 
         self.port = get_open_port()
         self.master_address = get_ip()

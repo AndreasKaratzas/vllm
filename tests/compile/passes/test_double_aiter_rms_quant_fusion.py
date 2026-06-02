@@ -32,10 +32,16 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
+from vllm.platforms import current_platform
 
 EPS = 1e-5
 HIDDEN_SIZE = 256
 GROUP_SIZE = 128
+FP8_DTYPE = current_platform.fp8_dtype()
+FP8_ATOL = 0.125
+FP8_RTOL = 0.125
+SCALE_ATOL = 1e-2
+SCALE_RTOL = 1e-2
 
 
 class _NoViewDoubleQuantModel(torch.nn.Module):
@@ -154,13 +160,17 @@ def test_double_aiter_rms_fp8_group_quant_fusion(
         fused_op = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
         backend.check_after_ops([fused_op])
 
-        # Numerical parity sanity-check: the fused pair must match the
-        # unfused pair on FP8 outputs (exact byte-equality is the goal,
-        # but allow a tiny tolerance for any residual numeric noise).
+        # Numerical parity sanity-check: scales should stay tight, while
+        # FP8 payloads can differ by one representable bin because the fused
+        # kernel computes RMSNorm and quantization in one pass.
         for fused_t, unfused_t in zip(outputs_fused, outputs_unfused):
+            if fused_t.dtype == FP8_DTYPE:
+                atol, rtol = FP8_ATOL, FP8_RTOL
+            else:
+                atol, rtol = SCALE_ATOL, SCALE_RTOL
             torch.testing.assert_close(
                 fused_t.to(torch.float32),
                 unfused_t.to(torch.float32),
-                atol=1e-2,
-                rtol=1e-2,
+                atol=atol,
+                rtol=rtol,
             )

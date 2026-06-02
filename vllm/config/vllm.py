@@ -378,6 +378,7 @@ class VllmConfig:
     up to this amount of time to allow already-running requests to complete. Any
     remaining requests are aborted once the timeout is reached.
     """
+    _use_v2_model_runner: bool | None = None
 
     def compute_hash(self) -> str:
         """
@@ -498,6 +499,12 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        resolved = getattr(self, "_use_v2_model_runner", None)
+        if resolved is not None:
+            return resolved
+        return self._resolve_use_v2_model_runner()
+
+    def _resolve_use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -839,6 +846,11 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        if (
+            self.model_config is not None
+            and getattr(self, "_use_v2_model_runner", None) is None
+        ):
+            self._use_v2_model_runner = self._resolve_use_v2_model_runner()
 
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -1319,7 +1331,9 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        if self.use_v2_model_runner:
+        if self._use_v2_model_runner is None:
+            self._use_v2_model_runner = self._resolve_use_v2_model_runner()
+        if self._use_v2_model_runner:
             self._validate_v2_model_runner()
 
         # Re-compute compile ranges after platform-specific config updates

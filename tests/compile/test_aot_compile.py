@@ -7,6 +7,7 @@ import pickle
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -17,6 +18,9 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
+)
+from vllm.compilation.compiler_interface import (
+    _is_standalone_compiled_artifact_saveable,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
@@ -31,6 +35,33 @@ from vllm.forward_context import set_forward_context
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
+
+
+def test_standalone_compiled_artifact_saveability_compatibility():
+    assert not _is_standalone_compiled_artifact_saveable(
+        SimpleNamespace(_artifacts=None)
+    )
+    assert not _is_standalone_compiled_artifact_saveable(
+        SimpleNamespace(
+            _artifacts=(b"artifact", SimpleNamespace(aot_autograd_artifacts=[]))
+        )
+    )
+    assert _is_standalone_compiled_artifact_saveable(
+        SimpleNamespace(
+            _artifacts=(b"artifact", SimpleNamespace(aot_autograd_artifacts=["key"]))
+        )
+    )
+    assert not _is_standalone_compiled_artifact_saveable(
+        SimpleNamespace(
+            _artifacts=(
+                b"artifact",
+                SimpleNamespace(aot_autograd_artifacts=["key1", "key2"]),
+            )
+        )
+    )
+    assert _is_standalone_compiled_artifact_saveable(
+        SimpleNamespace(is_saveable=lambda: True, _artifacts=None)
+    )
 
 
 @pytest.fixture

@@ -164,7 +164,13 @@ class TorchCompileWithNoGuardsWrapper:
                 "Please make sure torch.compile is enabled with the latest "
                 f"version of PyTorch (current using torch: {torch.__version__})"
             )
-        return self._compiled_callable.aot_compile((args, kwargs))
+        # vLLM saves the compiled artifact itself. Torch's AOTAutograd cache
+        # can try to pickle fake tensors captured while tracing custom kernels.
+        with torch._functorch.config.patch(
+            enable_autograd_cache=False,
+            enable_remote_autograd_cache=False,
+        ):
+            return self._compiled_callable.aot_compile((args, kwargs))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if envs.VLLM_USE_BYTECODE_HOOK:

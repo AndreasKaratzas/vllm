@@ -27,8 +27,8 @@ def _get_rocm_attention_config(model_name):
     """Return appropriate ROCm attention config for the given model.
 
     Whisper uses cross-attention (ENCODER_DECODER) which ROCM_AITER_FA does
-    not support. For Whisper we use ROCM_AITER_UNIFIED_ATTN (or TRITON_ATTN
-    as fallback); other models can use ROCM_AITER_FA.
+    not support. Use TRITON_ATTN for Whisper; other models can use
+    ROCM_AITER_FA.
     """
     from vllm.platforms import current_platform
 
@@ -36,16 +36,6 @@ def _get_rocm_attention_config(model_name):
         return None
 
     if "whisper" in model_name.lower():
-        try:
-            from vllm.platforms.rocm import _ON_MI3XX
-
-            if _ON_MI3XX:
-                return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
-        except ImportError:
-            logger.warning(
-                "Could not import _ON_MI3XX from rocm platform, "
-                "falling back to TRITON_ATTN for Whisper."
-            )
         return {"backend": "TRITON_ATTN"}
 
     return {"backend": "ROCM_AITER_FA"}
