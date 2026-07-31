@@ -8,7 +8,5 @@ permissions: {}
 
 jobs:
   approved:
-    if: github.event.review.state == 'approved'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Approval recorded"
+    if: github.repository_owner == 'vllm-project' && github.event.review.state == 'approved'
+    uses: vllm-project/vllm/.github/workflows/_reusable-record-ci-approval.yml@main
