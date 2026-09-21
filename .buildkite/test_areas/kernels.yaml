@@ -44,9 +44,9 @@ steps:
   parallelism: 3
   mirror:
     amd:
-      label: ":amd: (MI355) Core Operation Kernels Shard %N"
+      label: ":amd: (MI355 DPX) Core Operation Kernels Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -246,9 +246,9 @@ steps:
   parallelism: 6
   mirror:
     amd:
-      label: ":amd: (MI300) Quantization Kernels Shard %N"
+      label: ":amd: (MI355 DPX) Quantization Kernels Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -288,9 +288,9 @@ steps:
   parallelism: 5
   mirror:
     amd:
-      label: ":amd: (MI300) MoE Kernels Shard %N"
+      label: ":amd: (MI355 DPX) MoE Kernels Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       source_file_dependencies:
       - csrc/quantization/cutlass_w8a8/moe/

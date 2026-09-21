@@ -14,9 +14,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
   mirror:
     amd:
-      label: ":amd: (MI300) LM Eval Small Models"
+      label: ":amd: (MI355 DPX) LM Eval Small Models"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
