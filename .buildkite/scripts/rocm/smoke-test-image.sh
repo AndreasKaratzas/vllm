@@ -6,17 +6,26 @@ set -euo pipefail
 run_smoke_checks() {
     local required_dir=""
 
+    local workspace=/opt/vllm-ci/workspace
+    local vllm_dir=""
+
     for required_dir in \
-        /vllm-workspace \
-        /vllm-workspace/tests \
-        /vllm-workspace/src/vllm; do
+        "${workspace}/tests" \
+        "${workspace}/.buildkite" \
+        "${workspace}/requirements"; do
         if [[ ! -d "${required_dir}" ]]; then
             echo "Missing directory: ${required_dir}" >&2
             return 1
         fi
     done
-    if [[ ! -x /vllm-workspace/src/vllm/vllm-rs ]]; then
-        echo "Missing executable: /vllm-workspace/src/vllm/vllm-rs" >&2
+    if [[ ! -s /opt/vllm-ci/commit.txt || ! -s /opt/vllm-ci/wheel-filename.txt ]]; then
+        echo "Missing /opt/vllm-ci build metadata" >&2
+        return 1
+    fi
+    vllm_dir=$(PYTHONDONTWRITEBYTECODE=1 python3 -c \
+        'import importlib.util as u; print(u.find_spec("vllm").submodule_search_locations[0])')
+    if [[ ! -x "${vllm_dir}/vllm-rs" ]]; then
+        echo "Missing executable: ${vllm_dir}/vllm-rs" >&2
         return 1
     fi
 
@@ -48,17 +57,6 @@ fi
 if (($#)); then
     echo "Usage: $0 [--inside]" >&2
     exit 2
-fi
-
-if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
-    base_refreshed=""
-    if command -v buildkite-agent >/dev/null 2>&1; then
-        base_refreshed="$(buildkite-agent meta-data get rocm-base-refresh 2>/dev/null || true)"
-    fi
-    if [[ "${base_refreshed}" != "1" ]]; then
-        echo "ROCM_CI_ARTIFACT_ONLY=1; no full image was built, skipping smoke test"
-        exit 0
-    fi
 fi
 
 smoke_marker="./build/rocm-smoke-export/vllm-smoke-ok"

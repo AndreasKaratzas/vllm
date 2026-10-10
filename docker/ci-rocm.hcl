@@ -2,7 +2,7 @@
 #
 # This file lives in the vLLM repo at docker/ci-rocm.hcl so ROCm Docker
 # build mechanics can evolve with Dockerfile.rocm and docker-bake-rocm.hcl.
-# Used with: docker buildx bake -f docker/docker-bake-rocm.hcl -f docker/ci-rocm.hcl test-rocm-ci
+# Used with: docker buildx bake -f docker/docker-bake-rocm.hcl -f docker/ci-rocm.hcl test-rocm-ci-thin
 #
 # Registry cache: Docker Hub (rocm/vllm-ci-cache) is used exclusively.
 # AMD build agents already have Docker Hub credentials (they push the test
@@ -52,16 +52,29 @@ variable "IMAGE_TAG_LATEST" {
   default = ""
 }
 
+# Constant per base lineage (read from docker/Dockerfile.rocm_base by the CI
+# scripts). With rewrite-timestamp=true it makes rebuilds of unchanged steps
+# byte-identical, so registries and nodes dedupe them.
+variable "SOURCE_DATE_EPOCH" {
+  default = ""
+}
+
+# zstd decompresses ~1.8x faster than gzip on pull+unpack and exports ~8x
+# faster (measured on containerd 2.1); same attributes as
+# .buildkite/image_build/zstd.hcl. No force-compression here: it would make
+# BuildKit fetch and recompress inherited parent layers.
+variable "ROCM_IMAGE_OUTPUT_ATTRS" {
+  default = "oci-mediatypes=true,compression=zstd,compression-level=3,rewrite-timestamp=true"
+}
+
 # ROCm-specific GPU architecture targets
 
 variable "PYTORCH_ROCM_ARCH" {
   default = "gfx90a;gfx942;gfx950"
 }
 
-# Pre-built CI base image (Tier 1). Per-PR builds pull this instead of
-# rebuilding NIXL/DeepEP/torchcodec from scratch. The ci_base stage in
-# Dockerfile.rocm inherits from base, so CI_BASE_IMAGE only affects the test
-# stage and is irrelevant when building --target ci_base itself.
+# Runtime image the test stage adds one vLLM layer to (Dockerfile.rocm_base
+# target runtime-ci). CI sets it to the digest from build-runtime.sh.
 variable "CI_BASE_IMAGE" {
   default = "rocm/vllm-dev:ci_base"
 }
@@ -69,29 +82,6 @@ variable "CI_BASE_IMAGE" {
 # Leave CI_MAX_JOBS empty so the Dockerfile falls back to $(nproc) and uses
 # the full builder parallelism. Operators can still override this per build.
 variable "CI_MAX_JOBS" {
-  default = ""
-}
-
-# Upstream dependency commit pins -- extracted from Dockerfile.rocm by
-# ci-bake-rocm.sh at build time. Empty defaults are safe: the cache
-# functions produce no entries when the variable is empty.
-variable "NIXL_BRANCH" {
-  default = ""
-}
-
-variable "UCX_BRANCH" {
-  default = ""
-}
-
-variable "DEEPEP_BRANCH" {
-  default = ""
-}
-
-variable "NIXL_CACHE_KEY" {
-  default = ""
-}
-
-variable "DEEPEP_CACHE_KEY" {
   default = ""
 }
 
@@ -115,10 +105,6 @@ variable "DEEPEP_CACHE_KEY" {
 
 variable "DOCKERHUB_CACHE_REPO" {
   default = "rocm/vllm-ci-cache"
-}
-
-variable "DOCKERHUB_CACHE_TO" {
-  default = ""
 }
 
 variable "ROCM_CACHE_BRANCH_TAG" {
@@ -177,11 +163,11 @@ function "get_cache_to_rocm" {
   params = []
   result = compact([
     # Commit-scoped cache for exact re-runs.
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=${ROCM_FINAL_CACHE_TO_MODE}" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=${ROCM_FINAL_CACHE_TO_MODE},compression=zstd" : "",
     # Branch-scoped cache so later commits on the same branch can reuse the full
     # image layers when the parent-commit cache is evicted. Unlike the old
     # rocm-latest tag (which caused duplicate exporter 400s), this is per-branch.
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_FINAL_CACHE_TO_MODE}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_FINAL_CACHE_TO_MODE},compression=zstd" : "",
   ])
 }
 
@@ -200,10 +186,10 @@ function "get_cache_to_rocm_csrc" {
   params = []
   result = compact([
     # Export the exact-commit native cache for same-commit reruns.
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT},mode=${ROCM_CSRC_CACHE_TO_MODE}" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT},mode=${ROCM_CSRC_CACHE_TO_MODE},compression=zstd" : "",
     # Export the branch-scoped native cache so later commits on the same branch
     # can reuse compiled ROCm objects even when the exact parent cache is absent.
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_CSRC_CACHE_TO_MODE}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_CSRC_CACHE_TO_MODE},compression=zstd" : "",
   ])
 }
 
@@ -223,35 +209,8 @@ function "get_cache_to_rocm_rust" {
   result = compact([
     # Export exact-commit and branch-scoped Rust caches. A content-addressed
     # cache ref is appended by ci-bake-rocm.sh when that wrapper is used.
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${BUILDKITE_COMMIT},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
-  ])
-}
-
-# Cache functions for upstream dependency stages (NIXL/UCX, DeepEP).
-# These stages are pinned to specific upstream commit hashes, so cache keys use
-# those hashes rather than the Buildkite commit. This means the cache persists
-# across all vLLM commits as long as the upstream dependency pins don't change.
-
-function "get_cache_from_rocm_deps" {
-  params = []
-  result = compact([
-    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY}" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
-    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}" : ""),
-  ])
-}
-
-function "get_cache_to_rocm_nixl" {
-  params = []
-  result = compact([
-    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY},mode=min" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : ""),
-  ])
-}
-
-function "get_cache_to_rocm_deepep" {
-  params = []
-  result = compact([
-    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH},mode=min" : ""),
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${BUILDKITE_COMMIT},mode=${ROCM_RUST_CACHE_TO_MODE},compression=zstd" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_RUST_CACHE_TO_MODE},compression=zstd" : "",
   ])
 }
 
@@ -266,7 +225,9 @@ target "_ci-rocm" {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
     CI_BASE_IMAGE         = CI_BASE_IMAGE
     ROCM_SMOKE_ID         = BUILDKITE_BUILD_ID
+    VLLM_CI_COMMIT        = BUILDKITE_COMMIT
     max_jobs              = CI_MAX_JOBS
+    SOURCE_DATE_EPOCH     = SOURCE_DATE_EPOCH
   }
 }
 
@@ -279,7 +240,7 @@ target "test-rocm-ci" {
     IMAGE_TAG,
     IMAGE_TAG_LATEST,
   ])
-  output = ["type=registry"]
+  output = ["type=registry,${ROCM_IMAGE_OUTPUT_ATTRS}"]
 }
 
 # Validate the test image in the shared BuildKit graph and export only the
@@ -326,86 +287,10 @@ target "export-wheel-rocm" {
   output     = ["type=local,dest=./wheel-export"]
 }
 
-# Artifact-only vLLM build. GPU test jobs consume this artifact on top of
-# ci_base, avoiding a per-commit multi-GB image push/pull.
-group "test-rocm-ci-with-artifacts" {
-  targets = ["rust-rocm-ci", "csrc-rocm-ci", "export-wheel-rocm"]
-}
-
-# Full test image + wheel export. Kept for fallback/debugging when a pushed,
-# build-scoped image is useful.
-group "test-rocm-ci-with-wheel" {
-  targets = [
-    "rust-rocm-ci",
-    "csrc-rocm-ci",
-    "test-rocm-ci",
-    "smoke-test-rocm-ci",
-    "export-wheel-rocm",
-  ]
-}
-
-# Primary output tag for the ci_base build. In Buildkite this is a unique,
-# build-scoped tag; ci-bake-rocm.sh validates it before creating content and
-# stable aliases.
-variable "CI_BASE_IMAGE_TAG" {
-  default = "rocm/vllm-dev:ci_base"
-}
-
-# Versioned, content-addressed trusted ref. Preview builds import it read-only;
-# the wrapper creates their source-scoped content alias after validation.
-variable "CI_BASE_TRUSTED_CONTENT_REF" {
-  default = ""
-}
-
-# Cache-only targets for upstream dependency stages. These persist each stage
-# in the registry cache keyed by its upstream commit hash. When ci_base rebuilds
-# (e.g., requirements change), these stages are cache hits if their upstream
-# pins haven't changed -- saving ~35min of compilation.
-target "nixl-rocm-ci" {
-  inherits   = ["_common-rocm", "_ci-rocm"]
-  target     = "build_nixl"
-  cache-from = get_cache_from_rocm_deps()
-  cache-to   = get_cache_to_rocm_nixl()
-  output     = ["type=cacheonly"]
-}
-
-target "deepep-rocm-ci" {
-  inherits   = ["_common-rocm", "_ci-rocm"]
-  target     = "build_deepep"
-  cache-from = get_cache_from_rocm_deps()
-  cache-to   = get_cache_to_rocm_deepep()
-  output     = ["type=cacheonly"]
-}
-
-# Builds only the ci_base stage (NIXL, DeepEP, torchcodec, etc.)
-# Invoked by the ensure-ci-base step when the content hash of ci_base-affecting
-# files drifts from the remote image label. Per-PR builds then pull the result
-# as CI_BASE_IMAGE instead of rebuilding those slow layers on every commit.
-# Uses inline cache metadata on the ci_base image itself instead of exporting a
-# separate registry cache artifact.
-target "ci-base-rocm-ci" {
-  inherits   = ["_common-rocm"]
-  target     = "ci_base"
-  args = {
-    max_jobs = CI_MAX_JOBS
-  }
-  cache-from = concat(
-    compact([
-      CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",
-      CI_BASE_TRUSTED_CONTENT_REF != "" ? "type=registry,ref=${CI_BASE_TRUSTED_CONTENT_REF}" : "",
-    ]),
-    # Import upstream dependency caches so NIXL/DeepEP stages
-    # are cache hits even when ci_base itself needs rebuilding.
-    get_cache_from_rocm_deps(),
-  )
-  cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG])
-  attest   = ["type=provenance,disabled=true"]
-  output   = ["type=registry"]
-}
-
-# Group for ci_base builds -- exports dependency stage caches alongside the
-# ci_base image so future rebuilds can reuse them independently.
-group "ci-base-rocm-ci-with-deps" {
-  targets = ["nixl-rocm-ci", "deepep-rocm-ci", "ci-base-rocm-ci"]
+# Per-commit test image as a single layer on the runtime image (COPY --link),
+# so the builder never pulls the runtime and the push is only the vLLM layer.
+# GPU jobs pull this image directly. The smoke check runs in the same BuildKit
+# graph, which already holds the runtime as the csrc-build base.
+group "test-rocm-ci-thin" {
+  targets = ["rust-rocm-ci", "csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm", "smoke-test-rocm-ci"]
 }

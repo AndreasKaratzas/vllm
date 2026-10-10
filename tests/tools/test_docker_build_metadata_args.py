@@ -180,36 +180,9 @@ def test_rust_build_cache_excludes_git_metadata() -> None:
         assert "bash tools/build_rust.sh" in exact_version_stage
 
 
-def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
-    bake_file = (REPO_ROOT / "docker" / "docker-bake-rocm.hcl").read_text()
-
-    for expected in (
-        'variable "CI_BASE_CONTENT_HASH"',
-        'target "ci-base-rocm"',
-        'target   = "ci_base"',
-        '"vllm.ci_base.content_hash" = CI_BASE_CONTENT_HASH',
-    ):
-        assert expected in bake_file
-
-
-def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
-    ci_bake = ROCM_CI_BAKE.read_text()
-
-    for expected in (
-        "requirements/common.txt",
-        "requirements/rocm.txt",
-        "requirements/test/rocm.txt",
-        "docker/Dockerfile.rocm",
-    ):
-        assert expected in ci_bake
-
-
 def test_rocm_ci_smoke_runs_in_shared_buildkit_graph() -> None:
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
     ci_hcl = (REPO_ROOT / "docker" / "ci-rocm.hcl").read_text()
-    full_image_group = ci_hcl.split('group "test-rocm-ci-with-wheel"', maxsplit=1)[
-        1
-    ].split("}", maxsplit=1)[0]
 
     for expected in (
         "FROM test AS test_smoke",
@@ -220,7 +193,6 @@ def test_rocm_ci_smoke_runs_in_shared_buildkit_graph() -> None:
         'output     = ["type=local,dest=./build/rocm-smoke-export"]',
     ):
         assert expected in dockerfile or expected in ci_hcl
-    assert '"smoke-test-rocm-ci"' in full_image_group
     assert 'target "smoke-test-rocm-ci"' in ROCM_CI_BAKE.read_text()
 
 
@@ -248,7 +220,6 @@ def prepare_rocm_smoke_test(
             "PATH": f"{fake_bin}:{env['PATH']}",
         }
     )
-    env.pop("ROCM_CI_ARTIFACT_ONLY", None)
     env.pop("VLLM_CI_SMOKE_IMAGE", None)
     return env, marker, docker, docker_called
 

@@ -9,7 +9,7 @@
 #   docker buildx bake -f docker/docker-bake-rocm.hcl --print      # Show resolved config
 #
 # CI usage (with the vLLM-owned CI overlay):
-#   docker buildx bake -f docker/docker-bake-rocm.hcl -f docker/ci-rocm.hcl test-rocm-ci
+#   docker buildx bake -f docker/docker-bake-rocm.hcl -f docker/ci-rocm.hcl test-rocm-ci-thin
 
 variable "MAX_JOBS" {
   # Empty string lets the Dockerfile fall back to $(nproc) via
@@ -27,12 +27,6 @@ variable "COMMIT" {
   default = ""
 }
 
-# Content hash of ci_base-affecting files. Computed by ci-bake-rocm.sh and
-# embedded as a label so future builds can compare without rebuilding.
-variable "CI_BASE_CONTENT_HASH" {
-  default = ""
-}
-
 variable "CI_BASE_DOCKERFILE" {
   default = "docker/Dockerfile.rocm"
 }
@@ -47,26 +41,17 @@ variable "VLLM_BRANCH" {
   default = "main"
 }
 
-# CI_BASE_IMAGE: pre-built ci_base image for per-PR test builds.
-# Defaults to the local "ci_base" stage for standalone/local builds.
-# CI overrides this to "rocm/vllm-dev:ci_base" via environment variable.
+# BASE_IMAGE: the runtime image the vLLM wheel is compiled in (and release
+# images start from). CI sets it to the digest selected by build-runtime.sh.
+variable "BASE_IMAGE" {
+  default = "rocm/vllm-dev:base"
+}
+
+# CI_BASE_IMAGE: the image the test stage adds the vLLM layer to
+# (Dockerfile.rocm_base target runtime-ci). CI sets it to the same digest as
+# BASE_IMAGE.
 variable "CI_BASE_IMAGE" {
   default = "rocm/vllm-dev:ci_base"
-}
-
-# Upstream dependency commit pins. Plain local bake builds use the Dockerfile
-# ARG defaults. ci-bake-rocm.sh resolves those defaults (plus any env
-# overrides) and writes a small HCL override before invoking CI targets.
-variable "NIXL_BRANCH" {
-  default = ""
-}
-
-variable "UCX_BRANCH" {
-  default = ""
-}
-
-variable "DEEPEP_BRANCH" {
-  default = ""
 }
 
 group "default" {
@@ -82,6 +67,7 @@ target "_common-rocm" {
     REMOTE_VLLM                     = REMOTE_VLLM
     VLLM_BRANCH                     = VLLM_BRANCH
     CI_BASE_IMAGE                   = CI_BASE_IMAGE
+    BASE_IMAGE                      = BASE_IMAGE
   }
 }
 
@@ -106,23 +92,8 @@ target "test-rocm" {
   output   = ["type=docker"]
 }
 
-# CI base image target - builds only the ci_base stage (NIXL, DeepEP,
-# torchcodec, requirements, etc.). Used by the weekly scheduled build and
-# the auto-rebuild trigger when requirements change in a PR.
-target "ci-base-rocm" {
-  inherits = ["_common-rocm", "_labels"]
-  target   = "ci_base"
-  labels   = {
-    "vllm.ci_base.content_hash" = CI_BASE_CONTENT_HASH
-  }
-  tags     = ["rocm/vllm-dev:ci_base"]
-  output   = ["type=docker"]
-}
-
 # Wheel export target - extracts the built vLLM wheel + test workspace
-# to local disk. Used by CI to upload the wheel as a Buildkite artifact
-# so test jobs can assemble images locally from ci_base + wheel instead
-# of pulling the full large image from Docker Hub.
+# to local disk. CI uploads the wheel for the python-only compile job.
 #
 # Usage:
 #   docker buildx bake -f docker/docker-bake-rocm.hcl export-wheel-rocm

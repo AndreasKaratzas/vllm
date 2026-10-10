@@ -74,9 +74,8 @@ ACTIVE_BUILD_STATES = {
 RETRY_STATES = "failed,timed_out,expired"
 CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 SETUP_STEP_KEYS = {
-    "ensure-ci-base-amd",
+    "build-rocm-runtime-amd",
     "pre-commit",
-    "refresh-rocm-base-amd",
 }
 
 

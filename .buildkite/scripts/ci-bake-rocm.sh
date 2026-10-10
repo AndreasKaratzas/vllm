@@ -1,10 +1,9 @@
 #!/bin/bash
 # ci-bake-rocm.sh - Docker buildx bake wrapper for ROCm CI builds.
 #
-# The wrapper keeps three build concerns separate:
-#   * ci_base builds are content-addressed by vllm.ci_base.content_hash.
-#   * test image contents record the commit while runtime tags stay build-scoped.
-#   * ROCm install artifacts are uploaded only for targets that export wheels.
+# Builds the per-commit vLLM layer on top of the ROCm runtime image selected by
+# rocm/build-runtime.sh. The csrc and Rust stages use content-keyed registry
+# caches; the test image tag stays build-scoped.
 #
 # Usage:
 #   ci-bake-rocm.sh [TARGET]
@@ -15,10 +14,6 @@ set -euo pipefail
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
-DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_deepep mori_base ci_base"
-DEFAULT_CI_BASE_METADATA_VERSION="3"
 # ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
 # local-source stages rather than unreachable remote-fetch alternatives.
 DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
@@ -28,12 +23,11 @@ DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm vllm-version r
 # Docker's 128-character tag limit minus the longest cache prefix
 # ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
 ROCM_CACHE_BRANCH_TAG_MAX_LEN=111
-CI_BASE_WRITE_SCOPE=""
+CACHE_WRITE_SCOPE=""
 
 TARGET=""
 CI_HCL_SOURCE="${CI_HCL_SOURCE:-}"
 CI_HCL_PATH=""
-CI_BASE_LABEL_OVERRIDE_PATH=""
 CSRC_CACHE_OVERRIDE_PATH=""
 ROCM_ARG_OVERRIDE_PATH=""
 BUILD_CONTEXT_OVERRIDE_PATH=""
@@ -45,7 +39,6 @@ ROCM_BUILD_CONTEXT_COMMIT=""
 BAKE_FILES=()
 BAKE_ALLOW_ARGS=()
 BAKE_TARGETS=()
-DEPENDENCY_CACHE_TARGETS=()
 
 cleanup() {
     if [[ -n "${SCRIPT_TMP_DIR}" && -d "${SCRIPT_TMP_DIR}" ]]; then
@@ -142,40 +135,28 @@ normalize_repo_slug() {
 
 is_trusted_ci_cache_writer() {
     local actual_repo=""
-    local trusted_repo=""
 
     [[ "${BUILDKITE:-false}" == "true" ]] || return 1
     [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]] || return 1
-    [[ "${BUILDKITE_BRANCH:-}" == "${CI_BASE_STABLE_BRANCH:-main}" ]] || return 1
+    [[ "${BUILDKITE_BRANCH:-}" == "main" ]] || return 1
     actual_repo=$(normalize_repo_slug "${BUILDKITE_REPO:-}")
-    trusted_repo=$(normalize_repo_slug \
-        "${CI_BASE_STABLE_REPO_SLUG:-${DEFAULT_REPO_SLUG}}")
-    [[ -n "${actual_repo}" && "${actual_repo}" == "${trusted_repo}" ]]
+    [[ "${actual_repo}" == "${DEFAULT_REPO_SLUG}" ]]
 }
 
-ci_base_write_scope() {
+# Main writes canonical content cache refs; other builds read them and write
+# into a namespace scoped to their source repository.
+configure_cache_write_scope() {
     local identity=""
-    local source_repo="${BUILDKITE_PULL_REQUEST_REPO:-${BUILDKITE_REPO:-local}}"
 
     if is_trusted_ci_cache_writer; then
+        CACHE_WRITE_SCOPE=""
+        echo "Trusted main build: publishing canonical content cache refs"
         return 0
     fi
-    identity=$(printf '%s\n' "${source_repo}" | sha256sum | cut -c1-12)
-    printf 'preview-%s\n' "${identity}"
-}
-
-configure_ci_base_write_scope() {
-    local scope=""
-
-    scope=$(ci_base_write_scope)
-    if [[ -n "${scope}" ]]; then
-        CI_BASE_WRITE_SCOPE=$(clean_docker_tag "${scope}")
-        echo "Non-canonical cache writes use source scope: ${CI_BASE_WRITE_SCOPE}"
-    else
-        CI_BASE_WRITE_SCOPE=""
-        echo "Trusted main build: publishing canonical ci_base refs"
-    fi
-    export CI_BASE_WRITE_SCOPE
+    identity=$(printf '%s\n' "${BUILDKITE_PULL_REQUEST_REPO:-${BUILDKITE_REPO:-local}}" \
+        | sha256sum | cut -c1-12)
+    CACHE_WRITE_SCOPE="preview-${identity}"
+    echo "Non-canonical cache writes use source scope: ${CACHE_WRITE_SCOPE}"
 }
 
 get_buildkite_repo_slug() {
@@ -211,10 +192,6 @@ git_fetch_with_timeout() {
 
 git_fetch_for_cache() {
     git_fetch_with_timeout "$@" 2>/dev/null
-}
-
-hash_string_short() {
-    printf '%s' "$1" | sha256sum | cut -c1-16
 }
 
 list_content_files() {
@@ -527,10 +504,8 @@ prepare_ci_build_context() {
 
     # setuptools-scm understands Git's stable archive format, so wheels and
     # Rust artifacts retain their exact version without copying Git history.
-    if ! is_ci_base_target; then
-        write_ci_git_archival_metadata "${source_root}" "${context_root}" \
-            || return $?
-    fi
+    write_ci_git_archival_metadata "${source_root}" "${context_root}" \
+        || return $?
     if [[ -e "${context_root}/.git" ]]; then
         echo "Canonical CI Docker context unexpectedly contains .git" >&2
         return 1
@@ -538,32 +513,6 @@ prepare_ci_build_context() {
     ROCM_BUILD_CONTEXT_ROOT="${context_root}"
     BAKE_ALLOW_ARGS+=(--allow "fs.read=${ROCM_BUILD_CONTEXT_ROOT}")
     echo "Using canonical CI Docker context: ${ROCM_BUILD_CONTEXT_ROOT}"
-}
-
-configure_custom_rocm_stages() {
-    using_custom_rocm_dockerfiles || return 0
-    local context_root="${ROCM_BUILD_CONTEXT_ROOT:-.}"
-    local dockerfile="${context_root}/${CI_BASE_DOCKERFILE}"
-    local stages=""
-
-    (cd "${context_root}" && \
-        validate_rocm_dockerfile "${CI_BASE_DOCKERFILE}" \
-            ci_base test export_vllm export_test_smoke csrc-build rust-build) \
-        || return $?
-    # Hash all stages for custom layouts, including additional helper stages.
-    stages=$(rocm_dockerfile_stages "${dockerfile}" | paste -sd ' ')
-    CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${stages}}"
-    ROCM_CSRC_DOCKERFILE_STAGES="${ROCM_CSRC_DOCKERFILE_STAGES:-${stages}}"
-    ROCM_RUST_DOCKERFILE_STAGES="${ROCM_RUST_DOCKERFILE_STAGES:-${stages}}"
-}
-
-compose_dependency_cache_key() {
-    local prefix="$1"
-    local material="$2"
-    local cleaned_prefix=""
-
-    cleaned_prefix=$(clean_docker_tag "${prefix}" | cut -c1-96)
-    printf '%s-%s\n' "${cleaned_prefix}" "$(hash_string_short "${material}")"
 }
 
 hash_dockerfile_stages() {
@@ -689,41 +638,6 @@ get_content_arg_names() {
     fi | awk 'NF && !seen[$0]++'
 }
 
-compute_ci_base_content_hash() {
-    local -a content_paths=()
-    local -a content_args=()
-    local content_files_hash=""
-    local dockerfile="${CI_BASE_DOCKERFILE:-}"
-    local stages="${CI_BASE_DOCKERFILE_STAGES:-}"
-
-    read -r -a content_paths <<< "${CI_BASE_CONTENT_FILES}"
-    mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
-    )
-    if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
-        echo "Failed to hash ci_base content files" >&2
-        return 1
-    fi
-
-    {
-        printf 'content-files-hash:%s\n' "${content_files_hash}"
-        if [[ -n "${dockerfile}" ]]; then
-            printf 'dockerfile:%s\n' "${dockerfile}"
-            printf 'resolved-build-args:\n'
-            hash_dockerfile_arg_values "${dockerfile}" "${content_args[@]}" \
-                || return 1
-            if [[ -n "${stages}" ]]; then
-                printf 'dockerfile-stages:%s\n' "${stages}"
-                if content_regular_file "${dockerfile}"; then
-                    hash_dockerfile_stages "${dockerfile}" "${stages}"
-                else
-                    printf 'missing:%s\n' "${dockerfile}"
-                fi
-            fi
-        fi
-    } | sha256sum | cut -d' ' -f1
-}
-
 extract_dockerfile_arg_default() {
     local dockerfile="$1"
     local arg_name="$2"
@@ -826,7 +740,7 @@ hash_dockerfile_arg_values() {
 }
 
 pin_base_image() {
-    local dockerfile="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
+    local dockerfile="${CI_BASE_DOCKERFILE}"
     local base_image=""
     local digest=""
 
@@ -842,26 +756,18 @@ pin_base_image() {
     echo "Pinned base image for this build: ${BASE_IMAGE}"
 }
 
-is_ci_base_target() {
-    [[ "${TARGET}" == *"ci-base-rocm"* ]]
-}
-
 is_commit_image_target() {
-    [[ -n "${IMAGE_TAG:-}" && -n "${BUILDKITE_COMMIT:-}" ]] || return 1
-    is_ci_base_target && return 1
-    return 0
+    [[ -n "${IMAGE_TAG:-}" && -n "${BUILDKITE_COMMIT:-}" ]]
 }
 
-should_upload_wheel_artifacts() {
-    [[ "${UPLOAD_ROCM_WHEEL_ARTIFACTS:-0}" == "1" ]] && return 0
-    [[ "${TARGET}" == *"with-wheel"* \
-        || "${TARGET}" == *"export-wheel"* \
-        || "${TARGET}" == *"artifact"* ]]
+# Targets whose local outputs (wheel, smoke marker) later steps consume, so an
+# already-pushed image must not short-circuit them.
+has_local_outputs() {
+    should_export_rocm_smoke || [[ "${TARGET}" == *"export-wheel"* ]]
 }
 
 should_export_rocm_smoke() {
-    [[ "${TARGET}" == "test-rocm-ci-with-wheel" \
-        || "${TARGET}" == "smoke-test-rocm-ci" ]]
+    [[ "${TARGET}" == "test-rocm-ci-thin" || "${TARGET}" == "smoke-test-rocm-ci" ]]
 }
 
 verify_rocm_smoke_export() {
@@ -882,57 +788,8 @@ verify_rocm_smoke_export() {
     fi
 }
 
-get_remote_image_label() {
-    local image_ref="$1"
-    local label_key="$2"
-    local format="{{ index .Image.Config.Labels \"${label_key}\" }}"
-
-    docker buildx imagetools inspect "${image_ref}" \
-        --format "${format}" 2>/dev/null | awk 'NF { print; exit }' || true
-}
-
-remote_ci_base_identity_is_current_with_retry() {
-    local image_ref="$1"
-    local attempts="${CI_BASE_LABEL_ATTEMPTS:-4}"
-    local delay_secs="${CI_BASE_LABEL_RETRY_DELAY:-2}"
-    local identity=""
-    local remote_hash=""
-    local remote_version=""
-    local content_files_hash=""
-    local base_digest=""
-    local attempt=0
-    local expected_version="${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
-    local format='{{ index .Image.Config.Labels "vllm.ci_base.content_hash" }}|{{ index .Image.Config.Labels "vllm.ci_base.metadata_version" }}|{{ index .Image.Config.Labels "vllm.ci_base.content_files_hash" }}|{{ index .Image.Config.Labels "vllm.rocm.base_image_digest" }}'
-
-    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ \
-        || ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
-        echo "Invalid ci_base label retry configuration" >&2
-        return 1
-    fi
-
-    for ((attempt = 1; attempt <= attempts; attempt++)); do
-        identity=$(docker buildx imagetools inspect "${image_ref}" \
-            --format "${format}" 2>/dev/null || true)
-        IFS='|' read -r \
-            remote_hash remote_version content_files_hash base_digest <<< "${identity}"
-        if [[ "${remote_hash}" == "${CI_BASE_CONTENT_HASH:-}" \
-            && "${remote_version}" == "${expected_version}" \
-            && "${content_files_hash}" =~ ^[0-9a-f]{64}$ \
-            && "${base_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            return 0
-        fi
-        ((attempt == attempts)) || sleep "${delay_secs}"
-    done
-
-    echo "ci_base identity did not match after ${attempts} attempts: ${image_ref}" >&2
-    echo "  expected hash/version: ${CI_BASE_CONTENT_HASH:-<missing>}/${expected_version}" >&2
-    echo "  observed hash/version: ${remote_hash:-<missing>}/${remote_version:-<missing>}" >&2
-    return 1
-}
-
 registry_ref_exists_with_retry() {
-    local inspect_kind="$1"
-    local image_ref="$2"
+    local image_ref="$1"
     local attempts="${ROCM_REGISTRY_PROBE_ATTEMPTS:-2}"
     local delay_secs="${ROCM_REGISTRY_PROBE_RETRY_DELAY:-1}"
     local output=""
@@ -947,12 +804,8 @@ registry_ref_exists_with_retry() {
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         status=0
-        if [[ "${inspect_kind}" == "manifest" ]]; then
-            output=$(docker manifest inspect "${image_ref}" 2>&1) || status=$?
-        else
-            output=$(docker buildx imagetools inspect "${image_ref}" 2>&1) \
-                || status=$?
-        fi
+        output=$(docker buildx imagetools inspect "${image_ref}" 2>&1) \
+            || status=$?
         if ((status == 0)); then
             return 0
         fi
@@ -971,10 +824,6 @@ registry_ref_exists_with_retry() {
 
     echo "Registry probe failed after ${attempts} attempts: ${image_ref}" >&2
     return 1
-}
-
-remote_image_exists() {
-    registry_ref_exists_with_retry manifest "$1"
 }
 
 use_existing_builder() {
@@ -1011,46 +860,37 @@ create_and_bootstrap_builder() {
             --use \
             "${endpoint}"
     else
-        docker buildx create --name "${BUILDER_NAME}" --driver "${driver}" --use
+        # Pinned BuildKit (reproducible exports) with a disk-bounded GC policy.
+        docker buildx create --name "${BUILDER_NAME}" --driver "${driver}" --use \
+            --driver-opt "image=${ROCM_BUILDKIT_IMAGE:-moby/buildkit:v0.33.1}" \
+            --buildkitd-config "$(dirname "${BASH_SOURCE[0]}")/rocm/buildkitd.toml"
     fi
     docker buildx inspect --bootstrap
 }
 
 init_config() {
-    # shellcheck source=.buildkite/scripts/rocm/build-config.sh
-    source "$(dirname "${BASH_SOURCE[0]}")/rocm/build-config.sh"
-    configure_rocm_build
+    ROCM_BASE_DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
+    CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
+    export ROCM_BASE_DOCKERFILE CI_BASE_DOCKERFILE
 
-    TARGET="${1:-test-ci}"
-    if using_custom_rocm_dockerfiles; then
-        if [[ -z "${BASE_IMAGE:-}" ]]; then
-            echo "Custom ROCm builds require BASE_IMAGE from the selected base handoff" >&2
-            return 1
-        fi
-        if ! is_ci_base_target && [[ -z "${CI_BASE_IMAGE:-}" ]]; then
-            echo "Custom ROCm builds require CI_BASE_IMAGE from the selected ci_base handoff" >&2
-            return 1
-        fi
-    fi
+    TARGET="${1:-test-rocm-ci-thin}"
     BAKE_TARGETS=("${TARGET}")
-    DEPENDENCY_CACHE_TARGETS=()
     CI_HCL_SOURCE="${CI_HCL_SOURCE:-${CI_HCL_FILE:-${DEFAULT_CI_HCL_SOURCE}}}"
     VLLM_BAKE_FILE="${VLLM_BAKE_FILE:-docker/docker-bake-rocm.hcl}"
     BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
     BUILDKIT_SOCKET="${BUILDKIT_SOCKET:-/run/buildkit/buildkitd.sock}"
     PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950}"
-    CI_BASE_CONTENT_FILES="${CI_BASE_CONTENT_FILES:-${DEFAULT_CI_BASE_CONTENT_FILES}}"
-    CI_BASE_DOCKERFILE="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
-    if ! using_custom_rocm_dockerfiles; then
-        CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
+    # One epoch per base lineage, owned by the base Dockerfile.
+    SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(sed -nE \
+        's/^ARG SOURCE_DATE_EPOCH=([0-9]+)$/\1/p' "${ROCM_BASE_DOCKERFILE}" | head -1)}"
+    if [[ ! "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]; then
+        echo "SOURCE_DATE_EPOCH must be set in the ROCm base Dockerfile" >&2
+        return 1
     fi
-    CI_BASE_METADATA_VERSION="${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
-    CI_BASE_IMAGE_TAG="${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}"
-    export PYTORCH_ROCM_ARCH CI_BASE_DOCKERFILE
+    export SOURCE_DATE_EPOCH PYTORCH_ROCM_ARCH
 
     SCRIPT_TMP_DIR=$(mktemp -d -t ci-bake-rocm.XXXXXX)
     CI_HCL_PATH="${SCRIPT_TMP_DIR}/ci.hcl"
-    CI_BASE_LABEL_OVERRIDE_PATH="${SCRIPT_TMP_DIR}/ci-base-label-override.hcl"
     CSRC_CACHE_OVERRIDE_PATH="${SCRIPT_TMP_DIR}/rocm-csrc-cache-override.hcl"
     ROCM_ARG_OVERRIDE_PATH="${SCRIPT_TMP_DIR}/rocm-arg-override.hcl"
     BUILD_CONTEXT_OVERRIDE_PATH="${SCRIPT_TMP_DIR}/build-context-override.hcl"
@@ -1062,9 +902,7 @@ print_header() {
     echo "Target: ${TARGET}"
     echo "CI HCL source: ${CI_HCL_SOURCE}"
     echo "vLLM bake file: ${VLLM_BAKE_FILE}"
-    if is_ci_base_target; then
-        echo "Build mode: ci_base"
-    elif is_commit_image_target; then
+    if is_commit_image_target; then
         echo "Build mode: build-scoped commit image"
     else
         echo "Build mode: generic"
@@ -1075,11 +913,6 @@ print_header() {
 }
 
 validate_inputs() {
-    if using_custom_rocm_dockerfiles; then
-        validate_rocm_dockerfile "${ROCM_BASE_DOCKERFILE}" || return $?
-        validate_rocm_dockerfile "${CI_BASE_DOCKERFILE}" \
-            ci_base test export_vllm export_test_smoke csrc-build rust-build || return $?
-    fi
     if [[ ! -f "${VLLM_BAKE_FILE}" ]]; then
         echo "Error: vLLM bake file not found at ${VLLM_BAKE_FILE}"
         echo "Make sure you're running from the vLLM repository root"
@@ -1107,406 +940,6 @@ load_ci_hcl() {
 
 init_bake_files() {
     BAKE_FILES=(-f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}")
-    if using_custom_rocm_dockerfiles; then
-        # Custom stacks reuse local cache without replacing the
-        # standard ROCm registry caches for the same commit or branch.
-        BAKE_FILES+=(--set '*.cache-to=')
-    fi
-}
-
-compute_ci_base_hash_if_needed() {
-    if [[ -z "${CI_BASE_CONTENT_FILES:-}" ]]; then
-        return 0
-    fi
-    pin_base_image
-    if ! is_ci_base_target; then
-        return 0
-    fi
-    if [[ "${REMOTE_VLLM:-0}" != "0" ]]; then
-        echo "Error: content-addressed ci_base builds require REMOTE_VLLM=0" >&2
-        return 1
-    fi
-
-    CI_BASE_CONTENT_HASH=$(compute_ci_base_content_hash)
-    export CI_BASE_CONTENT_HASH
-    echo "ci_base content hash: ${CI_BASE_CONTENT_HASH:0:16}..."
-}
-
-wants_stable_ci_base_tag() {
-    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-        return 1
-    fi
-
-    if [[ "${CI_BASE_PUSH_STABLE_TAG:-}" == "1" ]]; then
-        return 0
-    fi
-    if [[ "${CI_BASE_PUSH_STABLE_TAG:-}" == "0" ]]; then
-        return 1
-    fi
-
-    [[ "${NIGHTLY:-0}" == "1" && "${BUILDKITE_BRANCH:-}" == "${CI_BASE_STABLE_BRANCH:-main}" ]]
-}
-
-trusted_ci_base_tip_matches_build() {
-    local branch="${CI_BASE_STABLE_BRANCH:-main}"
-    local build_commit="${BUILDKITE_COMMIT:-}"
-    local remote_tip=""
-
-    is_trusted_ci_cache_writer || return 1
-    if [[ ! "${build_commit}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        echo "Skipping ci_base stable tag: Buildkite commit is missing or invalid" >&2
-        return 1
-    fi
-    remote_tip=$(git ls-remote --exit-code "${BUILDKITE_REPO}" \
-        "refs/heads/${branch}" 2>/dev/null | awk 'NR == 1 { print $1 }')
-    if [[ ! "${remote_tip}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-        echo "Skipping ci_base stable tag: could not resolve remote ${branch} tip" >&2
-        return 1
-    fi
-    if [[ "${remote_tip,,}" != "${build_commit,,}" ]]; then
-        echo "Skipping ci_base stable tag: ${branch} advanced from ${build_commit} to ${remote_tip}" >&2
-        return 1
-    fi
-}
-
-should_push_stable_ci_base_tag() {
-    wants_stable_ci_base_tag \
-        && is_trusted_ci_cache_writer \
-        && trusted_ci_base_tip_matches_build
-}
-
-ci_base_tag_with_suffix() {
-    local base_tag="$1"
-    local suffix="$2"
-
-    printf '%s-%s\n' "${base_tag}" "$(clean_docker_tag "${suffix}")"
-}
-
-configure_ci_base_image_refs() {
-    local stable_tag="${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}"
-    local metadata_version="${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
-    local scope="${CI_BASE_WRITE_SCOPE:-}"
-    local trusted_content_tag=""
-    local content_tag=""
-    local build_tag=""
-    local primary_tag=""
-
-    if [[ ! "${metadata_version}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,15}$ ]]; then
-        echo "Invalid ci_base metadata version: ${metadata_version}" >&2
-        return 1
-    fi
-
-    if [[ "${BUILDKITE:-false}" == "true" ]] \
-        && ! is_full_git_sha "${BUILDKITE_COMMIT:-}"; then
-        echo "Invalid Buildkite commit for ci_base handoff: ${BUILDKITE_COMMIT:-<empty>}" >&2
-        return 1
-    fi
-    if [[ "${BUILDKITE:-false}" == "true" \
-        && -z "${BUILDKITE_BUILD_ID:-}" ]]; then
-        echo "Buildkite build ID is required for the ci_base runtime handoff" >&2
-        return 1
-    fi
-    if [[ -n "${BUILDKITE_BUILD_ID:-}" ]]; then
-        build_tag=$(ci_base_tag_with_suffix \
-            "${stable_tag}" "build-${BUILDKITE_BUILD_ID}")
-    fi
-    CI_BASE_IMAGE_TAG_BUILD_REF="${build_tag}"
-    export CI_BASE_IMAGE_TAG_BUILD_REF
-
-    if [[ -z "${CI_BASE_CONTENT_HASH:-}" ]]; then
-        if is_ci_base_target; then
-            echo "Error: ci_base builds require a content hash" >&2
-            return 1
-        fi
-        CI_BASE_IMAGE="${CI_BASE_IMAGE:-${stable_tag}}"
-        export CI_BASE_IMAGE
-        return 0
-    fi
-
-    trusted_content_tag=$(ci_base_tag_with_suffix \
-        "${stable_tag}" "v${metadata_version}-${CI_BASE_CONTENT_HASH}")
-    if [[ -n "${scope}" ]]; then
-        content_tag=$(ci_base_tag_with_suffix \
-            "${stable_tag}" "v${metadata_version}-${scope}-${CI_BASE_CONTENT_HASH}")
-    else
-        content_tag="${trusted_content_tag}"
-    fi
-    CI_BASE_IMAGE_TAG_CONTENT_REF="${content_tag}"
-    CI_BASE_TRUSTED_CONTENT_REF="${trusted_content_tag}"
-    primary_tag="${build_tag:-${content_tag}}"
-
-    # Main writes canonical content refs. Other builds import those refs
-    # read-only and publish into a source-scoped preview namespace.
-    # A fresh CI build first publishes its unique runtime tag. Content and
-    # stable aliases are created only after that image passes identity checks.
-    CI_BASE_STABLE_PROMOTION_REF="${stable_tag}"
-    CI_BASE_IMAGE_TAG="${primary_tag}"
-    export CI_BASE_IMAGE_TAG
-    export CI_BASE_IMAGE_TAG_CONTENT_REF
-    export CI_BASE_TRUSTED_CONTENT_REF
-    export CI_BASE_STABLE_PROMOTION_REF
-
-    if is_ci_base_target; then
-        IMAGE_TAG="${primary_tag}"
-        CI_BASE_IMAGE="${primary_tag}"
-        export CI_BASE_IMAGE
-        export IMAGE_TAG
-
-        echo "ci_base primary image tag: ${CI_BASE_IMAGE_TAG}"
-        if [[ -n "${build_tag}" ]]; then
-            echo "ci_base build image tag: ${build_tag}"
-        fi
-        echo "ci_base content image tag: ${content_tag}"
-        if wants_stable_ci_base_tag && is_trusted_ci_cache_writer; then
-            echo "ci_base stable alias is eligible for post-build promotion: ${stable_tag}"
-        else
-            echo "ci_base stable alias will not be pushed for this build"
-            echo "Set NIGHTLY=1 on ${CI_BASE_STABLE_BRANCH:-main} to refresh ${stable_tag}"
-        fi
-        return 0
-    fi
-
-    if [[ -z "${CI_BASE_IMAGE:-}" || "${CI_BASE_IMAGE}" == "${stable_tag}" ]]; then
-        CI_BASE_IMAGE="${content_tag}"
-        export CI_BASE_IMAGE
-        echo "Using ci_base image: ${CI_BASE_IMAGE}"
-    else
-        echo "Using provided CI_BASE_IMAGE override: ${CI_BASE_IMAGE}"
-    fi
-}
-
-publish_ci_base_handoff_ref() {
-    local source_ref="${1:-${CI_BASE_IMAGE_TAG_BUILD_REF:-${CI_BASE_IMAGE_TAG_CONTENT_REF:-}}}"
-    local content_ref="${CI_BASE_IMAGE_TAG_CONTENT_REF:-}"
-    local digest=""
-    local handoff_ref=""
-
-    is_ci_base_target || return 0
-    if [[ -z "${source_ref}" || -z "${content_ref}" ]]; then
-        echo "Cannot publish ci_base handoff without source and content refs" >&2
-        return 1
-    fi
-    if ! digest=$(resolve_image_digest "${source_ref}"); then
-        echo "Could not resolve immutable ci_base handoff: ${source_ref}" >&2
-        return 1
-    fi
-
-    handoff_ref="${content_ref%@*}@${digest}"
-    if ! confirm_remote_image_push "${handoff_ref}"; then
-        echo "Could not validate immutable ci_base handoff: ${handoff_ref}" >&2
-        return 1
-    fi
-    if command -v buildkite-agent >/dev/null 2>&1; then
-        if ! buildkite-agent meta-data set "rocm-ci-base-image" "${handoff_ref}"; then
-            echo "Could not publish required ci_base handoff metadata" >&2
-            return 1
-        fi
-    elif [[ "${BUILDKITE:-false}" == "true" ]]; then
-        echo "buildkite-agent not found; cannot publish ci_base handoff" >&2
-        return 1
-    fi
-    echo "Published immutable ci_base handoff: ${handoff_ref}"
-}
-
-ci_base_output_refs() {
-    printf '%s\n' \
-        "${CI_BASE_IMAGE_TAG_CONTENT_REF:-}" \
-        "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" \
-        | awk 'NF && !seen[$0]++'
-}
-
-ci_base_candidate_refs() {
-    printf '%s\n' \
-        "${CI_BASE_TRUSTED_CONTENT_REF:-}" \
-        "${CI_BASE_IMAGE_TAG_CONTENT_REF:-}" \
-        "${CI_BASE_STABLE_PROMOTION_REF:-}" \
-        | awk 'NF && !seen[$0]++'
-}
-
-find_matching_ci_base_ref() {
-    local candidate=""
-    local candidate_digest=""
-    local immutable_candidate=""
-
-    while IFS= read -r candidate; do
-        [[ -n "${candidate}" ]] || continue
-        # Missing content refs are normal after an input change. Avoid paying
-        # the full digest retry budget for each definitely absent candidate.
-        remote_image_exists "${candidate}" || continue
-        if ! candidate_digest=$(resolve_image_digest "${candidate}"); then
-            echo "Could not pin ci_base candidate: ${candidate}" >&2
-            continue
-        fi
-        immutable_candidate="${candidate%@*}@${candidate_digest}"
-        if remote_ci_base_identity_is_current_with_retry "${immutable_candidate}"; then
-            printf '%s\n' "${immutable_candidate}"
-            return 0
-        fi
-    done < <(ci_base_candidate_refs)
-
-    return 1
-}
-
-refresh_ci_base_tags_from_ref() {
-    local source_ref="$1"
-    local source_digest=""
-    local immutable_source=""
-    local tag=""
-    local tag_digest=""
-
-    if ! source_digest=$(resolve_image_digest "${source_ref}"); then
-        echo "Could not resolve selected ci_base image: ${source_ref}" >&2
-        return 1
-    fi
-    immutable_source="${source_ref%@*}@${source_digest}"
-
-    while IFS= read -r tag; do
-        [[ -n "${tag}" ]] || continue
-        [[ "${tag}" != "${source_ref}" ]] || continue
-        tag_digest=""
-        if remote_image_exists "${tag}"; then
-            tag_digest=$(resolve_image_digest "${tag}" || true)
-        fi
-        if [[ "${tag_digest}" == "${source_digest}" ]]; then
-            echo "ci_base tag is already current: ${tag}"
-            continue
-        fi
-        echo "Updating ci_base tag ${tag} -> ${immutable_source}"
-        if ! docker buildx imagetools create --prefer-index=false \
-            -t "${tag}" "${immutable_source}"; then
-            echo "Failed to update ci_base tag ${tag} from ${immutable_source}" >&2
-            return 1
-        fi
-        if ! tag_digest=$(resolve_image_digest "${tag}") \
-            || [[ "${tag_digest}" != "${source_digest}" ]]; then
-            echo "Updated ci_base tag does not resolve to the selected digest: ${tag}" >&2
-            return 1
-        fi
-    done < <(ci_base_output_refs)
-}
-
-promote_stable_ci_base_tag() {
-    local source_ref="${1:-${CI_BASE_IMAGE_TAG_BUILD_REF:-${CI_BASE_IMAGE_TAG_CONTENT_REF:-}}}"
-    local stable_ref="${CI_BASE_STABLE_PROMOTION_REF:-}"
-    local digest=""
-    local immutable_source=""
-
-    is_ci_base_target || return 0
-    wants_stable_ci_base_tag || return 0
-    if ! should_push_stable_ci_base_tag; then
-        echo "Skipping ci_base stable promotion: build is not the trusted current main tip"
-        return 0
-    fi
-    if [[ -z "${source_ref}" || -z "${stable_ref}" ]]; then
-        echo "Cannot promote ci_base stable tag without source and destination refs" >&2
-        return 1
-    fi
-    if ! digest=$(resolve_image_digest "${source_ref}"); then
-        echo "Could not pin ci_base source before stable promotion: ${source_ref}" >&2
-        return 1
-    fi
-    immutable_source="${source_ref%@*}@${digest}"
-    echo "Promoting ci_base stable tag from ${immutable_source}"
-    if ! docker buildx imagetools create --prefer-index=false \
-        -t "${stable_ref}" "${immutable_source}"; then
-        echo "Failed to promote ci_base stable tag" >&2
-        return 1
-    fi
-    if ! confirm_remote_image_push "${stable_ref}"; then
-        echo "Promoted ci_base stable tag did not become visible: ${stable_ref}" >&2
-        return 1
-    fi
-}
-
-maybe_reuse_matching_ci_base_ref() {
-    local matching_ref=""
-
-    matching_ref=$(find_matching_ci_base_ref) || return 1
-
-    echo "Found existing ci_base image with matching content hash: ${matching_ref}"
-    if ! refresh_ci_base_tags_from_ref "${matching_ref}"; then
-        echo "ci_base tag refresh failed after finding an exact image; aborting" >&2
-        return 2
-    fi
-    if ! promote_stable_ci_base_tag "${matching_ref}"; then
-        echo "ci_base stable promotion failed after finding an exact image; aborting" >&2
-        return 2
-    fi
-    if ! publish_ci_base_handoff_ref "${matching_ref}"; then
-        echo "ci_base handoff failed after finding an exact image; aborting" >&2
-        return 2
-    fi
-    echo "Content hashes match -- ci_base is current"
-    return 0
-}
-
-maybe_skip_existing_image() {
-    local remote_revision=""
-    local reuse_status=0
-
-    if [[ -z "${IMAGE_TAG:-}" ]]; then
-        return 0
-    fi
-
-    if [[ "${FORCE_BUILD:-0}" == "1" ]]; then
-        echo "FORCE_BUILD=1 set; skipping existing-image check"
-        return 0
-    fi
-    if ! is_ci_base_target \
-        && { should_upload_wheel_artifacts || should_export_rocm_smoke; }; then
-        echo "Local-output targets always run for the current build"
-        return 0
-    fi
-
-    echo "--- :mag: Checking image tag"
-    echo "Image tag: ${IMAGE_TAG}"
-
-    if is_ci_base_target && [[ -n "${CI_BASE_CONTENT_HASH:-}" ]]; then
-        maybe_reuse_matching_ci_base_ref || reuse_status=$?
-        case "${reuse_status}" in
-            0)
-                echo "Skipping build"
-                exit 0
-                ;;
-            1)
-                echo "No current ci_base image matched the expected content hash"
-                echo "Proceeding with build"
-                return 0
-                ;;
-            *)
-                return "${reuse_status}"
-                ;;
-        esac
-    fi
-
-    if ! remote_image_exists "${IMAGE_TAG}"; then
-        echo "Image not found, proceeding with build"
-        return 0
-    fi
-
-    if is_ci_base_target; then
-        echo "ci_base image already exists and no content hash was configured"
-        echo "Skipping build"
-        exit 0
-    fi
-
-    if is_commit_image_target; then
-        remote_revision=$(get_remote_image_label "${IMAGE_TAG}" "org.opencontainers.image.revision")
-        if [[ -n "${remote_revision}" && "${remote_revision}" != "${BUILDKITE_COMMIT}" ]]; then
-            echo "Existing image revision does not match ${BUILDKITE_COMMIT}"
-            echo "  found revision: ${remote_revision}"
-            echo "Rebuilding image"
-            return 0
-        fi
-
-        echo "Commit image already exists: ${IMAGE_TAG}"
-        echo "Skipping build"
-        exit 0
-    fi
-
-    echo "Image already exists: ${IMAGE_TAG}"
-    echo "Skipping build"
-    exit 0
 }
 
 setup_builder() {
@@ -1567,6 +1000,23 @@ setup_builder() {
     docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 }
 
+# rewrite-timestamp needs BuildKit >= 0.14 to apply to pushed images. Older
+# builders silently ignore it and every rebuild gets new layer digests.
+require_reproducible_builder() {
+    local version=""
+    version=$(docker buildx inspect --bootstrap 2>/dev/null \
+        | sed -nE 's/^BuildKit version:[[:space:]]+v?([0-9]+\.[0-9]+).*/\1/p' | head -1)
+    if [[ -z "${version}" ]]; then
+        echo "Could not determine the BuildKit version of the active builder" >&2
+        return 1
+    fi
+    if (( ${version%%.*} == 0 && ${version#*.} < 14 )); then
+        echo "BuildKit ${version} cannot produce reproducible ROCm images; need >= 0.14" >&2
+        return 1
+    fi
+    echo "BuildKit ${version}: reproducible exports enabled (SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH})"
+}
+
 validate_cache_branch_tag() {
     local name="$1"
     local value="$2"
@@ -1585,11 +1035,6 @@ prepare_git_cache_metadata() {
     local target_repo_slug=""
     local target_repo_url=""
     local merge_base_ref=""
-
-    if is_ci_base_target; then
-        echo "Skipping commit-cache ancestry lookup for content-addressed ci_base"
-        return 0
-    fi
 
     if [[ -z "${PARENT_COMMIT:-}" || -z "${VLLM_MERGE_BASE_COMMIT:-}" ]] \
         && git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
@@ -1671,144 +1116,11 @@ prepare_git_cache_metadata() {
     fi
 }
 
-ci_base_metadata_pairs() {
-    local dockerfile="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
-    local stages="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
-    local content_files="${CI_BASE_CONTENT_FILES:-${DEFAULT_CI_BASE_CONTENT_FILES}}"
-    local content_files_hash=""
-    local base_image=""
-    local base_image_digest=""
-    local -a content_paths=()
-    local -a content_args=()
-
-    read -r -a content_paths <<< "${content_files}"
-    if [[ ${#content_paths[@]} -gt 0 ]]; then
-        if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
-            echo "Failed to hash ci_base metadata content files" >&2
-            return 1
-        fi
-    fi
-    mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
-    )
-
-    base_image=$(resolve_dockerfile_arg_value "${dockerfile}" "BASE_IMAGE")
-    if [[ -n "${base_image}" ]]; then
-        if ! base_image_digest=$(resolve_image_digest "${base_image}"); then
-            echo "Failed to resolve ci_base metadata digest for ${base_image}" >&2
-            return 1
-        fi
-    fi
-
-    metadata_pair "vllm.ci_base.metadata_version" "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
-    metadata_pair "vllm.ci_base.content_hash" "${CI_BASE_CONTENT_HASH:-}"
-    metadata_pair "vllm.ci_base.content_files_hash" "${content_files_hash}"
-    metadata_pair "vllm.ci_base.content_files" "${content_files}"
-    metadata_pair "vllm.ci_base.content_args" "$(join_words "${content_args[@]}")"
-    metadata_pair "vllm.ci_base.dockerfile" "${dockerfile}"
-    metadata_pair "vllm.ci_base.dockerfile_stages" "${stages}"
-
-    # The parent identity is digest-only: mutable aliases that resolve to the
-    # same image must produce byte-identical canonical metadata.
-    metadata_pair "vllm.rocm.base_image" "${base_image_digest}"
-    metadata_pair "vllm.rocm.base_image_digest" "${base_image_digest}"
-    metadata_pair "vllm.rocm.pytorch_rocm_arch" "${PYTORCH_ROCM_ARCH:-}"
-    metadata_pair "vllm.rocm.nic_backend" "$(resolve_dockerfile_arg_value "${dockerfile}" "NIC_BACKEND")"
-    metadata_pair "vllm.rocm.ainic_version" "$(resolve_dockerfile_arg_value "${dockerfile}" "AINIC_VERSION")"
-    metadata_pair "vllm.rocm.ubuntu_codename" "$(resolve_dockerfile_arg_value "${dockerfile}" "UBUNTU_CODENAME")"
-    metadata_pair "vllm.rocm.max_jobs" "$(resolve_dockerfile_arg_value "${dockerfile}" "max_jobs")"
-    metadata_pair "vllm.rocm.nixl_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "NIXL_REPO")"
-    metadata_pair "vllm.rocm.nixl_commit" "${NIXL_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "NIXL_BRANCH")}"
-    metadata_pair "vllm.rocm.ucx_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_REPO")"
-    metadata_pair "vllm.rocm.ucx_commit" "${UCX_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_BRANCH")}"
-    metadata_pair "vllm.rocm.deepep_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_REPO")"
-    metadata_pair "vllm.rocm.deepep_commit" "${DEEPEP_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_BRANCH")}"
-    metadata_pair "vllm.rocm.deepep_nic" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_NIC")"
-    metadata_pair "vllm.rocm.deepep_rocm_arch" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_ROCM_ARCH")"
-    metadata_pair "vllm.rocm.nixl_cache_key" "${NIXL_CACHE_KEY:-}"
-    metadata_pair "vllm.rocm.deepep_cache_key" "${DEEPEP_CACHE_KEY:-}"
-}
-
-write_ci_base_metadata_annotations() {
-    local metadata="$1"
-    local key=""
-    local value=""
-
-    [[ -n "${metadata}" ]] || return 0
-    while IFS=$'\t' read -r key value; do
-        [[ -n "${key}" && -n "${value}" ]] || continue
-        printf '    "%s",\n' \
-            "$(hcl_escape_string "manifest:${key}=${value}")"
-    done <<< "${metadata}"
-}
-
-write_ci_base_metadata_labels() {
-    local metadata="$1"
-    local key=""
-    local value=""
-
-    [[ -n "${metadata}" ]] || return 0
-    while IFS=$'\t' read -r key value; do
-        [[ -n "${key}" && -n "${value}" ]] || continue
-        printf '    "%s" = "%s"\n' \
-            "$(hcl_escape_string "${key}")" \
-            "$(hcl_escape_string "${value}")"
-    done <<< "${metadata}"
-}
-
-write_ci_base_label_override() {
-    local target_name=""
-    local metadata=""
-    local -a ci_base_targets=()
-
-    if [[ -z "${CI_BASE_CONTENT_HASH:-}" ]]; then
-        return 0
-    fi
-
-    mapfile -t ci_base_targets < <(
-        {
-            printf '%s\n' "ci-base-rocm"
-            sed -n -E 's/^target "(ci-base-rocm[^"]+)".*/\1/p' "${CI_HCL_PATH}" 2>/dev/null || true
-        } | awk '!seen[$0]++'
-    )
-
-    if [[ ${#ci_base_targets[@]} -eq 0 ]]; then
-        return 0
-    fi
-
-    metadata=$(ci_base_metadata_pairs)
-
-    : > "${CI_BASE_LABEL_OVERRIDE_PATH}"
-    for target_name in "${ci_base_targets[@]}"; do
-        cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
-target "${target_name}" {
-  annotations = [
-    "manifest:org.opencontainers.image.revision=",
-EOF
-        write_ci_base_metadata_annotations "${metadata}" >> "${CI_BASE_LABEL_OVERRIDE_PATH}"
-        cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
-  ]
-  labels = {
-    "org.opencontainers.image.revision" = ""
-EOF
-        write_ci_base_metadata_labels "${metadata}" >> "${CI_BASE_LABEL_OVERRIDE_PATH}"
-        cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
-  }
-}
-
-EOF
-    done
-
-    BAKE_FILES+=(-f "${CI_BASE_LABEL_OVERRIDE_PATH}")
-    echo "Appended ci_base metadata label override for targets: ${ci_base_targets[*]}"
-}
-
 uses_rocm_csrc_cache() {
     case "${TARGET}" in
         csrc-rocm-ci \
             | test-rocm-ci \
-            | test-rocm-ci-with-wheel \
-            | test-rocm-ci-with-artifacts \
+            | test-rocm-ci-thin \
             | export-wheel-rocm \
             | smoke-test-rocm-ci)
             return 0
@@ -1823,8 +1135,7 @@ uses_rocm_rust_cache() {
     case "${TARGET}" in
         rust-rocm-ci \
             | test-rocm-ci \
-            | test-rocm-ci-with-wheel \
-            | test-rocm-ci-with-artifacts \
+            | test-rocm-ci-thin \
             | export-wheel-rocm \
             | smoke-test-rocm-ci)
             return 0
@@ -1866,7 +1177,7 @@ compute_rocm_csrc_content_hash() {
 
 compute_rocm_csrc_content_hash_if_needed() {
     local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
-    local write_scope="${CI_BASE_WRITE_SCOPE:-}"
+    local write_scope="${CACHE_WRITE_SCOPE}"
 
     if [[ "${ROCM_CSRC_CONTENT_CACHE:-1}" == "0" ]] || ! uses_rocm_csrc_cache; then
         return 0
@@ -1916,7 +1227,7 @@ compute_rocm_rust_content_hash() {
 
 compute_rocm_rust_content_hash_if_needed() {
     local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
-    local write_scope="${CI_BASE_WRITE_SCOPE:-}"
+    local write_scope="${CACHE_WRITE_SCOPE}"
 
     if [[ "${ROCM_RUST_CONTENT_CACHE:-1}" == "0" ]] || ! uses_rocm_rust_cache; then
         return 0
@@ -1954,18 +1265,6 @@ hcl_escape_string() {
     printf '%s' "${value}"
 }
 
-join_words() {
-    local IFS=" "
-    printf '%s' "$*"
-}
-
-metadata_pair() {
-    local key="$1"
-    local value="${2:-}"
-
-    printf '%s\t%s\n' "${key}" "${value}"
-}
-
 write_hcl_string_list() {
     local indent="$1"
     shift
@@ -1986,10 +1285,6 @@ write_rocm_build_arg_override() {
     dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     mapfile -t arg_names < <(
         {
-            get_content_arg_names \
-                "${dockerfile_rocm}" \
-                "${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}" \
-                "${CI_BASE_CONTENT_ARGS:-}"
             get_content_arg_names \
                 "${dockerfile_rocm}" \
                 "${ROCM_CSRC_DOCKERFILE_STAGES:-${DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES}}" \
@@ -2076,12 +1371,12 @@ should_export_content_cache_ref() {
             return 1
             ;;
         missing|"")
-            if registry_ref_exists_with_retry imagetools "${trusted_ref}"; then
+            if registry_ref_exists_with_retry "${trusted_ref}"; then
                 echo "${cache_name} trusted content cache is visible: ${trusted_ref}"
                 return 1
             fi
             if [[ "${cache_ref}" != "${trusted_ref}" ]] \
-                && registry_ref_exists_with_retry imagetools "${cache_ref}"; then
+                && registry_ref_exists_with_retry "${cache_ref}"; then
                 echo "${cache_name} scoped content cache is visible: ${cache_ref}"
                 return 1
             fi
@@ -2220,7 +1515,9 @@ write_rocm_cache_override() {
         esac
     fi
 
-    if [[ "${TARGET}" == "test-rocm-ci-with-wheel" ]]; then
+    # test-rocm-ci exports the same final-image refs in the thin group; a
+    # second exporter to one ref only races it.
+    if [[ "${TARGET}" == "test-rocm-ci-thin" ]]; then
         export_wheel_cache_to=()
     else
         export_wheel_cache_to=("${rocm_cache_to[@]}")
@@ -2291,200 +1588,10 @@ EOF
     echo "Appended ROCm cache override with non-fatal registry exports"
 }
 
-extract_dependency_pins() {
-    local bake_dir=""
-    local dockerfile_rocm=""
-    local physical_dockerfile=""
-    local var=""
-    local val=""
-
-    bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
-    physical_dockerfile="${dockerfile_rocm}"
-    if [[ -n "${ROCM_BUILD_CONTEXT_ROOT:-}" && "${dockerfile_rocm}" != /* ]]; then
-        physical_dockerfile="${ROCM_BUILD_CONTEXT_ROOT}/${dockerfile_rocm}"
-    fi
-    if [[ ! -f "${physical_dockerfile}" ]]; then
-        return 0
-    fi
-
-    for var in NIXL_BRANCH UCX_BRANCH DEEPEP_BRANCH; do
-        if [[ -n "${!var:-}" ]]; then
-            echo "Using provided ${var}: ${!var}"
-            continue
-        fi
-
-        val=$(
-            sed -n -E "s/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+${var}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
-                "${physical_dockerfile}" | head -1
-        )
-        if [[ -n "${val}" ]]; then
-            export "${var}=${val}"
-            echo "Extracted ${var}=${val} from ${dockerfile_rocm}"
-        fi
-    done
-}
-
-compute_dependency_cache_keys() {
-    local bake_dir=""
-    local dockerfile_rocm=""
-    local nixl_branch=""
-    local ucx_branch=""
-    local deepep_branch=""
-    local nixl_material=""
-    local deepep_material=""
-
-    bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
-    nixl_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "NIXL_BRANCH")
-    ucx_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "UCX_BRANCH")
-    deepep_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "DEEPEP_BRANCH")
-
-    if [[ -n "${nixl_branch}" && -n "${ucx_branch}" ]]; then
-        nixl_material=$(compose_stage_cache_material "${dockerfile_rocm}" "base build_nixl")
-        NIXL_CACHE_KEY=$(
-            compose_dependency_cache_key \
-                "${nixl_branch}-ucx-${ucx_branch}" \
-                "${nixl_material}"
-        )
-        export NIXL_CACHE_KEY
-        echo "NIXL dependency cache key: ${NIXL_CACHE_KEY}"
-    fi
-
-    if [[ -n "${deepep_branch}" ]]; then
-        deepep_material=$(compose_stage_cache_material "${dockerfile_rocm}" "base build_deepep")
-        DEEPEP_CACHE_KEY=$(
-            compose_dependency_cache_key \
-                "${deepep_branch}" \
-                "${deepep_material}"
-        )
-        export DEEPEP_CACHE_KEY
-        echo "DeepEP dependency cache key: ${DEEPEP_CACHE_KEY}"
-    fi
-}
-
-compose_stage_cache_material() {
-    local dockerfile="$1"
-    local stages="$2"
-    local -a content_args=()
-
-    mapfile -t content_args < <(get_content_arg_names "${dockerfile}" "${stages}" "")
-    {
-        printf 'dockerfile:%s\n' "${dockerfile}"
-        printf 'dockerfile-stages:%s\n' "${stages}"
-        hash_dockerfile_stages "${dockerfile}" "${stages}"
-        printf 'resolved-build-args:\n'
-        hash_dockerfile_arg_values "${dockerfile}" "${content_args[@]}"
-    }
-}
-
-dependency_cache_ref_exists() {
-    local cache_ref="$1"
-    registry_ref_exists_with_retry imagetools "${cache_ref}"
-}
-
-dependency_cache_ref_for_target() {
-    local target="$1"
-    local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
-
-    case "${target}" in
-        nixl-rocm-ci)
-            if [[ -n "${NIXL_CACHE_KEY:-}" ]]; then
-                printf '%s\n' "${cache_repo}:nixl-rocm-${NIXL_CACHE_KEY}"
-            elif [[ -n "${NIXL_BRANCH:-}" ]]; then
-                printf '%s\n' "${cache_repo}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH:-}"
-            fi
-            ;;
-        deepep-rocm-ci)
-            if [[ -n "${DEEPEP_CACHE_KEY:-}" ]]; then
-                printf '%s\n' "${cache_repo}:deepep-rocm-${DEEPEP_CACHE_KEY}"
-            elif [[ -n "${DEEPEP_BRANCH:-}" ]]; then
-                printf '%s\n' "${cache_repo}:deepep-rocm-${DEEPEP_BRANCH}"
-            fi
-            ;;
-    esac
-}
-
-add_dependency_cache_target() {
-    local target="$1"
-
-    if printf '%s\n' "${DEPENDENCY_CACHE_TARGETS[@]}" | grep -qx "${target}"; then
-        return 0
-    fi
-    DEPENDENCY_CACHE_TARGETS+=("${target}")
-}
-
-resolve_ci_base_dependency_targets() {
-    local mode="${ROCM_DEP_CACHE_EXPORT_MODE:-missing}"
-    local nixl_ref=""
-    local deepep_ref=""
-
-    [[ "${TARGET}" == "ci-base-rocm-ci-with-deps" ]] || return 0
-
-    case "${mode}" in
-        always)
-            echo "ROCM_DEP_CACHE_EXPORT_MODE=always; exporting all dependency caches serially"
-            for target in nixl-rocm-ci deepep-rocm-ci; do
-                if [[ -n "$(dependency_cache_ref_for_target "${target}")" ]]; then
-                    add_dependency_cache_target "${target}"
-                fi
-            done
-            ;;
-        never)
-            BAKE_TARGETS=("ci-base-rocm-ci")
-            DEPENDENCY_CACHE_TARGETS=()
-            echo "ROCM_DEP_CACHE_EXPORT_MODE=never; building ci_base without dependency cache exports"
-            return 0
-            ;;
-        missing|"")
-            ;;
-        *)
-            echo "Error: ROCM_DEP_CACHE_EXPORT_MODE must be one of: missing, always, never"
-            exit 1
-            ;;
-    esac
-
-    if [[ "${mode}" != "always" && -n "${NIXL_CACHE_KEY:-}" ]]; then
-        nixl_ref=$(dependency_cache_ref_for_target "nixl-rocm-ci")
-        if dependency_cache_ref_exists "${nixl_ref}"; then
-            echo "NIXL dependency cache exists: ${nixl_ref}"
-        else
-            echo "NIXL dependency cache missing; will seed: ${nixl_ref}"
-            add_dependency_cache_target "nixl-rocm-ci"
-        fi
-    fi
-
-    if [[ "${mode}" != "always" && -n "${DEEPEP_CACHE_KEY:-}" ]]; then
-        deepep_ref=$(dependency_cache_ref_for_target "deepep-rocm-ci")
-        if dependency_cache_ref_exists "${deepep_ref}"; then
-            echo "DeepEP dependency cache exists: ${deepep_ref}"
-        else
-            echo "DeepEP dependency cache missing; will seed: ${deepep_ref}"
-            add_dependency_cache_target "deepep-rocm-ci"
-        fi
-    fi
-
-    BAKE_TARGETS=("ci-base-rocm-ci")
-    if [[ ${#DEPENDENCY_CACHE_TARGETS[@]} -eq 0 ]]; then
-        echo "All dependency caches exist; building ci_base without dependency cache exports"
-    else
-        echo "Resolved dependency cache seed targets: ${DEPENDENCY_CACHE_TARGETS[*]}"
-        echo "Resolved ci_base bake targets: ${BAKE_TARGETS[*]}"
-    fi
-}
-
-bake_config_targets() {
-    printf '%s\n' "${DEPENDENCY_CACHE_TARGETS[@]}" "${BAKE_TARGETS[@]}" \
-        | awk 'NF && !seen[$0]++'
-}
-
 print_bake_config() {
-    local -a print_targets=()
-
     echo "--- :page_facing_up: Resolved bake configuration"
-    mapfile -t print_targets < <(bake_config_targets)
     docker buildx bake "${BAKE_ALLOW_ARGS[@]}" \
-        "${BAKE_FILES[@]}" --print "${print_targets[@]}" | tee "${BAKE_CONFIG_FILE}"
+        "${BAKE_FILES[@]}" --print "${BAKE_TARGETS[@]}" | tee "${BAKE_CONFIG_FILE}"
 
     if command -v buildkite-agent >/dev/null 2>&1 && [[ -n "${BUILDKITE_BUILD_NUMBER:-}" ]]; then
         buildkite-agent artifact upload "${BAKE_CONFIG_FILE}" || true
@@ -2494,242 +1601,70 @@ print_bake_config() {
     fi
 }
 
-confirm_remote_image_push() {
-    local image_ref="$1"
-
-    if [[ -z "${CI_BASE_CONTENT_HASH:-}" ]]; then
-        remote_image_exists "${image_ref}"
-        return
-    fi
-
-    if remote_ci_base_identity_is_current_with_retry "${image_ref}"; then
-        return 0
-    fi
-
-    echo "Remote image does not have the expected complete ci_base identity."
-    return 1
-}
-
-verify_dependency_cache_ref() {
-    local cache_ref="$1"
-    local attempts="${ROCM_DEP_CACHE_VERIFY_ATTEMPTS:-6}"
-    local delay_secs="${ROCM_DEP_CACHE_VERIFY_DELAY:-5}"
-    local attempt
-
-    for ((attempt = 1; attempt <= attempts; attempt++)); do
-        if dependency_cache_ref_exists "${cache_ref}"; then
-            echo "Dependency cache confirmed: ${cache_ref}"
-            return 0
-        fi
-        if [[ ${attempt} -lt ${attempts} ]]; then
-            echo "Dependency cache not visible yet (${attempt}/${attempts}): ${cache_ref}"
-            sleep "${delay_secs}"
-        fi
-    done
-
-    echo "ERROR: dependency cache was not confirmed after upload: ${cache_ref}"
-    return 1
-}
-
-seed_dependency_caches_if_needed() {
-    local target=""
-    local cache_ref=""
-
-    if [[ "${TARGET}" != "ci-base-rocm-ci-with-deps" ]]; then
-        return 0
-    fi
-    if [[ ${#DEPENDENCY_CACHE_TARGETS[@]} -eq 0 ]]; then
-        return 0
-    fi
-
-    echo "--- :docker: Seeding ROCm dependency caches"
-    echo "Dependency cache uploads are required for this build."
-    echo "Seeding serially to avoid concurrent Docker Hub cache exporters."
-
-    for target in "${DEPENDENCY_CACHE_TARGETS[@]}"; do
-        cache_ref=$(dependency_cache_ref_for_target "${target}")
-        if [[ -z "${cache_ref}" ]]; then
-            echo "ERROR: could not resolve dependency cache ref for ${target}"
-            return 1
-        fi
-
-        echo "--- :docker: Seeding ${target}"
-        echo "Expected cache ref: ${cache_ref}"
-        docker buildx bake \
-            "${BAKE_ALLOW_ARGS[@]}" \
-            "${BAKE_FILES[@]}" \
-            --progress "${BUILDKIT_PROGRESS:-plain}" \
-            "${target}"
-        verify_dependency_cache_ref "${cache_ref}"
-    done
-}
-
 run_bake() {
-    local confirmation_ref="${IMAGE_TAG:-}"
-
-    if is_ci_base_target && [[ -n "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" ]]; then
-        confirmation_ref="${CI_BASE_IMAGE_TAG_BUILD_REF}"
-    fi
-
     echo "--- :docker: Building ${TARGET}"
     docker buildx bake \
         "${BAKE_ALLOW_ARGS[@]}" \
         "${BAKE_FILES[@]}" \
         --progress "${BUILDKIT_PROGRESS:-plain}" \
         "${BAKE_TARGETS[@]}"
-
-    if is_ci_base_target; then
-        if ! confirm_remote_image_push "${confirmation_ref}"; then
-            echo "Fresh ci_base image failed identity validation: ${confirmation_ref}" >&2
-            return 1
-        fi
-        refresh_ci_base_tags_from_ref "${confirmation_ref}"
-    fi
     echo "--- :white_check_mark: Build complete"
 }
 
-upload_wheel_artifacts_if_present() {
-    local wheel_dir="./wheel-export"
-    local artifact_dir="artifacts/vllm-rocm-install"
-    local archive_name="vllm-rocm-install.tar.gz"
-    local metadata_dir="${wheel_dir}/.vllm-ci-artifact"
-    local build_base_digest=""
-    local expected_native_base_image=""
-    local native_base_image=""
-    local native_base_digest=""
-    local whl=""
-    local whl_name=""
+# Thin images already contain the installed wheel and test workspace; only the
+# python-only compile job needs the .whl itself.
+upload_thin_wheel_artifact() {
+    local artifact_dir="artifacts/vllm-rocm-wheel"
     local -a wheels=()
 
-    if ! should_upload_wheel_artifacts; then
-        return 0
-    fi
-
-    if [[ -d "${wheel_dir}" ]]; then
-        mapfile -t wheels < <(find "${wheel_dir}" -maxdepth 1 -type f -name '*.whl' -print)
-    fi
-    if [[ ${#wheels[@]} -ne 1 ]]; then
-        echo "Expected exactly one ROCm wheel in ${wheel_dir}; found ${#wheels[@]}" >&2
+    [[ "${TARGET}" == "test-rocm-ci-thin" ]] || return 0
+    mapfile -t wheels < <(find ./wheel-export -maxdepth 1 -type f -name '*.whl' -print)
+    if ((${#wheels[@]} != 1)); then
+        echo "Expected exactly one exported vLLM wheel; found ${#wheels[@]}" >&2
         return 1
     fi
-    whl="${wheels[0]}"
-    whl_name=$(basename "${whl}")
-    native_base_image="${CI_BASE_IMAGE_TAG_BUILD_REF:-${CI_BASE_IMAGE:-}}"
-    if [[ -z "${native_base_image}" ]]; then
-        echo "Native ROCm artifact requires a ci_base image reference" >&2
-        return 1
-    fi
-    if [[ "${BUILDKITE:-false}" == "true" ]]; then
-        expected_native_base_image=$(ci_base_tag_with_suffix \
-            "${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}" \
-            "build-${BUILDKITE_BUILD_ID:-}")
-        if [[ "${native_base_image}" != "${expected_native_base_image}" ]]; then
-            echo "Native ROCm artifact requires the exact ci_base build handoff: ${native_base_image}" >&2
-            return 1
-        fi
-        if [[ ! "${CI_BASE_IMAGE:-}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-            echo "ROCm artifact build base must be digest-pinned: ${CI_BASE_IMAGE:-<empty>}" >&2
-            return 1
-        fi
-        build_base_digest="${CI_BASE_IMAGE##*@}"
-        if ! native_base_digest=$(resolve_image_digest "${native_base_image}"); then
-            echo "Could not resolve native ci_base handoff: ${native_base_image}" >&2
-            return 1
-        fi
-        if [[ "${native_base_digest}" != "${build_base_digest}" ]]; then
-            echo "Native ci_base handoff does not match the artifact build base" >&2
-            echo "  native: ${native_base_image}@${native_base_digest}" >&2
-            echo "  build:  ${CI_BASE_IMAGE}" >&2
-            return 1
-        fi
-    fi
-
-    echo "--- :package: Uploading ROCm vLLM install artifact"
-    rm -rf "${artifact_dir}" "${metadata_dir}"
-    mkdir -p "${artifact_dir}" "${metadata_dir}"
-
-    printf '%s\n' "${BUILDKITE_COMMIT:-local}" > "${metadata_dir}/commit.txt"
-    printf '%s\n' "${native_base_image}" > "${metadata_dir}/native-base-image.txt"
-    printf '%s\n' "${CI_BASE_IMAGE:-}" > "${metadata_dir}/ci-base-image.txt"
-    printf '%s\n' "${IMAGE_TAG:-}" > "${metadata_dir}/fallback-image.txt"
-    printf '%s\n' "${whl_name}" > "${metadata_dir}/wheel-filename.txt"
-
-    tar -C "${wheel_dir}" -czf "${artifact_dir}/${archive_name}" .
-    (
-        cd "${artifact_dir}"
-        sha256sum "${archive_name}" > "${archive_name}.sha256"
-    )
-    echo "Created ${archive_name}: $(du -sh "${artifact_dir}/${archive_name}" | cut -f1)"
-    cp "${metadata_dir}"/*.txt "${artifact_dir}/"
-    cp "${whl}" "${artifact_dir}/${whl_name}"
-    echo "Copied ${whl_name}: $(du -sh "${artifact_dir}/${whl_name}" | cut -f1)"
-
+    rm -rf "${artifact_dir}" && mkdir -p "${artifact_dir}" || return 1
+    cp "${wheels[0]}" "${artifact_dir}/" || return 1
+    (cd "${artifact_dir}" && sha256sum -- *.whl > "$(basename "${wheels[0]}").sha256") || return 1
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent artifact upload "${artifact_dir}/*" || return 1
-        echo "ROCm vLLM install artifacts uploaded to ${artifact_dir}/"
-    elif [[ "${BUILDKITE:-false}" == "true" ]]; then
-        echo "buildkite-agent not found; cannot upload required ROCm artifacts" >&2
-        return 1
     else
-        echo "Not in Buildkite, skipping artifact upload"
+        echo "Not in Buildkite; wheel left in ${artifact_dir}"
     fi
-
-    rm -rf "${wheel_dir}"
 }
 
 main() {
     init_config "$@"
-    configure_ci_base_write_scope
+    configure_cache_write_scope
     print_header
     validate_inputs
     load_ci_hcl
     init_bake_files
-    if is_ci_base_target; then
-        prepare_ci_build_context
-        configure_custom_rocm_stages
-    fi
-    compute_ci_base_hash_if_needed
-    configure_ci_base_image_refs
-    maybe_skip_existing_image
+    pin_base_image
     setup_builder
+    require_reproducible_builder
     prepare_git_cache_metadata
-    # Non-ci_base builds may deepen a shallow checkout above. Derive archival
+    # prepare_git_cache_metadata may deepen a shallow checkout. Derive archival
     # version metadata only after that lookup sees the available tag history.
-    if ! is_ci_base_target; then
-        prepare_ci_build_context
-        configure_custom_rocm_stages
-    fi
-    extract_dependency_pins
+    prepare_ci_build_context
     write_rocm_build_arg_override
-    compute_dependency_cache_keys
-    write_ci_base_label_override
     compute_rocm_csrc_content_hash_if_needed
     compute_rocm_rust_content_hash_if_needed
     write_rocm_cache_override
     # Keep the context override last so every bake target uses the owned tree.
     write_build_context_override
-    resolve_ci_base_dependency_targets
     print_bake_config
     if [[ "${BAKE_PRINT_ONLY:-0}" == "1" ]]; then
         echo "BAKE_PRINT_ONLY=1 set; skipping build"
         return 0
     fi
-    if should_upload_wheel_artifacts; then
-        # wheel-export is an output directory, not a BuildKit cache. Starting
-        # clean prevents a failed/retried export from packaging a stale wheel.
-        rm -rf ./wheel-export
+    if has_local_outputs; then
+        # Outputs, not caches: never let a failed or retried build reuse them.
+        rm -rf ./wheel-export ./build/rocm-smoke-export
     fi
-    if should_export_rocm_smoke; then
-        # The marker is a build output, not a cache. Never accept stale output
-        # from an earlier build or retry.
-        rm -rf ./build/rocm-smoke-export
-    fi
-    seed_dependency_caches_if_needed
     run_bake
     verify_rocm_smoke_export
-    promote_stable_ci_base_tag
-    publish_ci_base_handoff_ref
-    upload_wheel_artifacts_if_present
+    upload_thin_wheel_artifact
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

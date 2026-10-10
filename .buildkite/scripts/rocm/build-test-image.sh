@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Build the ROCm CI test image or wheel artifact.
-#
-# When base selection changes, build the full image so downstream ROCm tests
-# validate the selected base -> ci_base -> CI image chain.
+# Build the per-commit ROCm CI image: the runtime-ci image selected by
+# build-runtime.sh plus one vLLM layer, pushed as IMAGE_TAG. GPU jobs pull it
+# directly. The wheel is compiled in the deployment runtime, so CI tests the
+# same wheel a release built from that runtime ships, and test-only
+# dependency changes do not invalidate the native compile cache.
 
 set -euo pipefail
 
@@ -34,44 +35,25 @@ load_digest_handoff() {
 }
 
 main() {
-    local base_refreshed=0
-
     # This job always builds the checked-out commit. Some externally generated
     # pipeline templates still inject remote-fetch settings; do not let those
     # settings make the source identity commit-specific or bypass local edits.
     export REMOTE_VLLM=0
     unset VLLM_BRANCH
 
-    if ! load_digest_handoff \
-        rocm-ci-base-image CI_BASE_IMAGE "ROCm ci_base handoff"; then
-        if [[ "${BUILDKITE:-false}" == "true" ]]; then
-            echo "Required ROCm ci_base handoff metadata is missing or invalid" >&2
-            return 1
+    local handoff
+    for handoff in "rocm-runtime-image BASE_IMAGE" "rocm-runtime-ci-image CI_BASE_IMAGE"; do
+        # shellcheck disable=SC2086
+        if ! load_digest_handoff ${handoff} "ROCm ${handoff%% *} handoff"; then
+            if [[ "${BUILDKITE:-false}" == "true" ]]; then
+                echo "Required ${handoff%% *} metadata is missing or invalid" >&2
+                return 1
+            fi
+            echo "No ${handoff%% *} metadata found; using the local default"
         fi
-        echo "No ROCm ci_base handoff metadata found; using the local default"
-    fi
+    done
 
-    if ! load_digest_handoff \
-        rocm-base-image BASE_IMAGE "ROCm base handoff"; then
-        if [[ "${BUILDKITE:-false}" == "true" ]]; then
-            echo "Required ROCm base handoff metadata is missing or invalid" >&2
-            return 1
-        fi
-        echo "No ROCm base handoff metadata found; using the local default"
-    fi
-
-    if [[ "$(metadata_get rocm-base-refresh)" == "1" ]]; then
-        echo "The selected ROCm base differs from the current stable base"
-        base_refreshed=1
-    fi
-
-    if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" && "${base_refreshed}" != "1" ]]; then
-        echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
-        IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
-        return
-    fi
-
-    bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
+    bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-thin
 }
 
 main "$@"

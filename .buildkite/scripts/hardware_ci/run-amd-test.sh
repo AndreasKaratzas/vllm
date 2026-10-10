@@ -34,9 +34,6 @@
 ###############################################################################
 set -o pipefail
 
-# shellcheck source=.buildkite/scripts/rocm/build-config.sh
-source "$(dirname "${BASH_SOURCE[0]}")/../rocm/build-config.sh" || exit $?
-
 : "${BUILDKIT_PROGRESS:=plain}"
 : "${TERM:=xterm-256color}"
 : "${FORCE_COLOR:=1}"
@@ -109,21 +106,14 @@ clear_ci_orchestration_env() {
     VLLM_CI_REQUIRE_WORKSPACE_MOUNT \
     VLLM_TEST_COMMANDS \
     VLLM_CI_BRANCH \
-    CI_ROCM_DOCKERFILE_BASE \
-    CI_ROCM_DOCKERFILE \
     ROCM_BASE_DOCKERFILE \
     CI_BASE_DOCKERFILE \
-    VLLM_CI_BASE_IMAGE \
-    VLLM_CI_FALLBACK_IMAGE \
     VLLM_CI_DOCKER_DISABLED \
     VLLM_CI_DIAGNOSTICS_DIR \
-    VLLM_CI_ARTIFACT_GLOB \
-    VLLM_CI_ARTIFACT_CHECKSUM_GLOB \
     VLLM_CI_EXPECTED_GPU_COUNT \
     VLLM_CI_K8S_POD_NAME \
     VLLM_CI_K8S_NAMESPACE \
     VLLM_CI_K8S_NODE_NAME \
-    VLLM_CI_USE_ARTIFACTS \
     VLLM_CI_RESULTS_ROOT \
     VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
 }
@@ -188,116 +178,6 @@ run_docker_with_ci_timeout() {
   return "${status}"
 }
 
-prepare_artifact_image() {
-  if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
-    return 1
-  fi
-  if ! command -v buildkite-agent >/dev/null 2>&1; then
-    echo "buildkite-agent not found; cannot download ROCm wheel artifact"
-    return 1
-  fi
-
-  local artifact_glob="${VLLM_CI_ARTIFACT_GLOB:-artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz}"
-  local archive=""
-  local metadata_file=""
-  local base_image="${VLLM_CI_BASE_IMAGE:-rocm/vllm-dev:ci_base}"
-  local artifact_image=""
-  local artifact_key=""
-  local base_digest=""
-  local wheel_dir=""
-  local context_dir=""
-  local workspace_dir=""
-
-  artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX)
-  wheel_dir="${artifact_work_dir}/wheels"
-  context_dir="${artifact_work_dir}/context"
-  workspace_dir="${context_dir}/workspace"
-  mkdir -p "${wheel_dir}" "${context_dir}/wheels" "${workspace_dir}"
-
-  echo "--- Downloading ROCm wheel artifact"
-  if ! buildkite-agent artifact download "${artifact_glob}" "${artifact_work_dir}"; then
-    echo "Failed to download ${artifact_glob}"
-    return 1
-  fi
-  buildkite-agent artifact download \
-    "artifacts/vllm-rocm-install/ci-base-image.txt" \
-    "${artifact_work_dir}" >/dev/null 2>&1 || true
-
-  archive=$(find "${artifact_work_dir}" -name "vllm-rocm-install.tar.gz" -type f | head -1)
-  if [[ -z "${archive}" || ! -f "${archive}" ]]; then
-    echo "ROCm wheel artifact archive was not found"
-    return 1
-  fi
-
-  metadata_file=$(find "${artifact_work_dir}" -name "ci-base-image.txt" -type f | head -1)
-  if [[ -n "${metadata_file}" && -s "${metadata_file}" ]]; then
-    base_image=$(tr -d '[:space:]' < "${metadata_file}")
-  elif using_custom_rocm_dockerfiles; then
-    echo "Custom ROCm ci_base metadata is missing; using the full CI image"
-    return 1
-  fi
-
-  echo "--- Preparing local ROCm test image"
-  echo "Base image: ${base_image}"
-  docker pull "${base_image}" || return 1
-  base_digest=$(
-    docker image inspect \
-      --format='{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' \
-      "${base_image}" 2>/dev/null || printf '%s' "${base_image}"
-  )
-
-  artifact_key=$(
-    {
-      printf 'base-image:%s\n' "${base_digest}"
-      sha256sum "${archive}"
-    } | sha256sum | cut -c1-24
-  )
-  artifact_image="rocm/vllm-ci-artifact:${artifact_key}"
-
-  if docker image inspect "${artifact_image}" >/dev/null 2>&1; then
-    echo "Using existing local ROCm artifact image: ${artifact_image}"
-    image_name="${artifact_image}"
-    return 0
-  fi
-
-  tar -xzf "${archive}" -C "${wheel_dir}" || return 1
-  if ! ls "${wheel_dir}"/*.whl >/dev/null 2>&1; then
-    echo "ROCm wheel artifact did not contain a wheel"
-    return 1
-  fi
-  if [[ ! -d "${wheel_dir}/tests" ]]; then
-    echo "ROCm wheel artifact did not contain the test workspace"
-    return 1
-  fi
-
-  cp "${wheel_dir}"/*.whl "${context_dir}/wheels/" || return 1
-  tar -C "${wheel_dir}" \
-    --exclude='*.whl' \
-    --exclude='.vllm-ci-artifact' \
-    --exclude='./.vllm-ci-artifact' \
-    -cf - . \
-    | tar -C "${workspace_dir}" -xf - || return 1
-  cat > "${context_dir}/Dockerfile" <<'EOF'
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
-COPY wheels/ /tmp/vllm-wheels/
-COPY workspace/ /vllm-workspace/
-RUN python3 -m pip install --no-deps --force-reinstall /tmp/vllm-wheels/*.whl \
-    && rm -rf /tmp/vllm-wheels
-WORKDIR /vllm-workspace
-EOF
-
-  echo "--- Building local ROCm test image"
-  docker build \
-    --pull=false \
-    --progress "${BUILDKIT_PROGRESS}" \
-    --build-arg "BASE_IMAGE=${base_image}" \
-    -t "${artifact_image}" \
-    "${context_dir}" || return 1
-  image_name="${artifact_image}"
-  return 0
-}
-
 is_native_runtime() {
   [[ "${AMD_CI_RUNTIME:-}" == "native" || "${NATIVE_CI:-}" == "true" ]]
 }
@@ -332,198 +212,92 @@ validate_native_workspace() {
   fi
 }
 
+# Usage: overlay_python_only_source <commit> <wheel> <workspace_dir>
+overlay_python_only_source() {
+  local recorded_commit="$1"
+  local wheel="$2"
+  local workspace_dir="$3"
+  local checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+  local checkout_commit=""
+
+  if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
+    echo "Python-only native CI requires BUILDKITE_BUILD_CHECKOUT_PATH" >&2
+    return 1
+  fi
+  if ! git -c "safe.directory=${checkout}" -C "${checkout}" \
+    rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Buildkite checkout is not a Git worktree: ${checkout}" >&2
+    return 1
+  fi
+  checkout_commit=$(
+    git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse HEAD
+  ) || return 1
+  if [[ "${checkout_commit}" != "${recorded_commit}" ]]; then
+    echo "Buildkite checkout ${checkout_commit} does not match test image commit ${recorded_commit}" >&2
+    return 1
+  fi
+
+  # setup.py normally derives this from .git via setuptools-scm. The native
+  # source overlay deliberately excludes Git metadata, so preserve the exact
+  # version from the already installed, artifact-matched wheel.
+  VLLM_VERSION_OVERRIDE=$(
+    python3 -c 'import importlib.metadata as m; print(m.version("vllm"))'
+  ) || return 1
+  export VLLM_VERSION_OVERRIDE
+  VLLM_PRECOMPILED_WHEEL_LOCATION="${wheel}"
+  export VLLM_PRECOMPILED_WHEEL_LOCATION
+  echo "INFO: native Python-only wheel=${VLLM_PRECOMPILED_WHEEL_LOCATION}"
+
+  echo "--- Overlaying full source checkout for Python-only compilation"
+  # Archive the verified commit instead of copying the worktree so dirty or
+  # untracked agent files cannot contaminate the artifact-matched workspace.
+  git -c "safe.directory=${checkout}" -C "${checkout}" \
+    archive --format=tar "${recorded_commit}" \
+    | tar --no-same-owner -C "${workspace_dir}" -xf - || return 1
+  for required_source in setup.py pyproject.toml vllm; do
+    if [[ ! -e "${workspace_dir}/${required_source}" ]]; then
+      echo "Full source checkout is missing ${required_source}" >&2
+      return 1
+    fi
+  done
+}
+
+# Native pods run the per-build test image: the wheel is already installed and
+# the test workspace is staged under /opt/vllm-ci/workspace.
 prepare_native_workspace() {
   local test_commands="${1:-}"
-
-  if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
-    echo "Native CI requires VLLM_CI_USE_ARTIFACTS=1"
-    return 1
-  fi
-  if ! command -v buildkite-agent >/dev/null 2>&1; then
-    echo "buildkite-agent not found; cannot download ROCm wheel artifact"
-    return 1
-  fi
-  validate_native_workspace || return 1
-
-  local artifact_glob="${VLLM_CI_ARTIFACT_GLOB:-artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz}"
-  local artifact_checksum_glob="${VLLM_CI_ARTIFACT_CHECKSUM_GLOB:-${artifact_glob}.sha256}"
-  local artifact_step="${VLLM_CI_ARTIFACT_STEP:-image-build-amd}"
-  local archive=""
-  local checksum=""
-  local download_dir=""
-  local metadata_dir=""
-  local recorded_base=""
-  local recorded_commit=""
-  local recorded_wheel=""
-  local checkout=""
-  local checkout_commit=""
   local workspace_dir="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
-  local wheel_dir=""
-  local attempt=0
-  local attempt_dir=""
-  local -a archives=()
-  local -a checksums=()
-  local -a wheels=()
+  local staged_dir="/opt/vllm-ci/workspace"
+  local image_commit=""
+  local wheel_name=""
 
-  artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX) || return 1
-  wheel_dir="${artifact_work_dir}/wheels"
-  mkdir -p "${wheel_dir}" || return 1
-
-  echo "--- Downloading ROCm wheel artifact from ${artifact_step} (native in-pod)"
-  for attempt in 1 2 3; do
-    attempt_dir="${artifact_work_dir}/download-${attempt}"
-    rm -rf "${attempt_dir}" || return 1
-    mkdir -p "${attempt_dir}" || return 1
-    if buildkite-agent artifact download \
-      "${artifact_glob}" "${attempt_dir}" --step "${artifact_step}" \
-      && buildkite-agent artifact download \
-        "${artifact_checksum_glob}" "${attempt_dir}" --step "${artifact_step}"; then
-      download_dir="${attempt_dir}"
-      break
-    fi
-    echo "Artifact download attempt ${attempt}/3 failed"
-    if [[ "${attempt}" -lt 3 ]]; then
-      sleep $((attempt * 2))
-    fi
-  done
-  if [[ -z "${download_dir}" ]]; then
-    echo "Failed to download ${artifact_glob} and ${artifact_checksum_glob} from ${artifact_step}"
+  validate_native_workspace || return 1
+  image_commit=$(tr -d '\r\n' < /opt/vllm-ci/commit.txt 2>/dev/null || true)
+  if [[ -z "${BUILDKITE_COMMIT:-}" || "${image_commit}" != "${BUILDKITE_COMMIT}" ]]; then
+    echo "Image was built for ${image_commit:-<missing>}, not ${BUILDKITE_COMMIT:-unset}" >&2
     return 1
   fi
 
-  mapfile -t archives < <(
-    find "${download_dir}" -name "vllm-rocm-install.tar.gz" -type f -print
-  )
-  mapfile -t checksums < <(
-    find "${download_dir}" -name "vllm-rocm-install.tar.gz.sha256" -type f -print
-  )
-  if [[ ${#archives[@]} -ne 1 || ${#checksums[@]} -ne 1 ]]; then
-    echo "Expected exactly one ROCm archive and checksum; found ${#archives[@]} archive(s) and ${#checksums[@]} checksum(s)" >&2
-    return 1
-  fi
-  archive="${archives[0]}"
-  checksum="${checksums[0]}"
-  if [[ "$(dirname "${archive}")" != "$(dirname "${checksum}")" ]]; then
-    echo "ROCm archive and checksum were downloaded to different directories" >&2
-    return 1
-  fi
-  (
-    cd "$(dirname "${archive}")"
-    sha256sum -c "$(basename "${checksum}")"
-  ) || return 1
-
-  tar --no-same-owner -xzf "${archive}" -C "${wheel_dir}" || return 1
-  mapfile -t wheels < <(
-    find "${wheel_dir}" -maxdepth 1 -type f -name '*.whl' -print
-  )
-  if [[ ${#wheels[@]} -ne 1 ]]; then
-    echo "ROCm artifact must contain exactly one top-level wheel; found ${#wheels[@]}" >&2
-    return 1
-  fi
-  metadata_dir="${wheel_dir}/.vllm-ci-artifact"
-  for metadata_file in commit.txt native-base-image.txt wheel-filename.txt; do
-    if [[ ! -s "${metadata_dir}/${metadata_file}" ]]; then
-      echo "ROCm artifact metadata is missing ${metadata_file}" >&2
-      return 1
-    fi
-  done
-  for metadata_file in ci-base-image.txt fallback-image.txt; do
-    if [[ ! -f "${metadata_dir}/${metadata_file}" ]]; then
-      echo "ROCm artifact metadata is missing ${metadata_file}" >&2
-      return 1
-    fi
-  done
-
-  recorded_commit=$(tr -d '\r\n' < "${metadata_dir}/commit.txt")
-  recorded_base=$(tr -d '\r\n' < "${metadata_dir}/native-base-image.txt")
-  recorded_wheel=$(tr -d '\r\n' < "${metadata_dir}/wheel-filename.txt")
-  if [[ -z "${BUILDKITE_COMMIT:-}" || "${recorded_commit}" != "${BUILDKITE_COMMIT}" ]]; then
-    echo "ROCm artifact commit ${recorded_commit} does not match ${BUILDKITE_COMMIT:-unset}" >&2
-    return 1
-  fi
-  if [[ -z "${BUILDKITE_BUILD_ID:-}" \
-    || "${recorded_base}" != *":ci_base-build-${BUILDKITE_BUILD_ID}" ]]; then
-    echo "ROCm artifact base is not scoped to Buildkite build ${BUILDKITE_BUILD_ID:-unset}: ${recorded_base}" >&2
-    return 1
-  fi
-  if [[ -z "${VLLM_CI_BASE_IMAGE:-}" || "${recorded_base}" != "${VLLM_CI_BASE_IMAGE}" ]]; then
-    echo "ROCm artifact base ${recorded_base} does not match ${VLLM_CI_BASE_IMAGE:-unset}" >&2
-    return 1
-  fi
-  if [[ "${recorded_wheel}" != "$(basename "${wheels[0]}")" ]]; then
-    echo "ROCm artifact wheel manifest ${recorded_wheel} does not match $(basename "${wheels[0]}")" >&2
-    return 1
-  fi
-  for required_dir in tests .buildkite requirements; do
-    if [[ ! -d "${wheel_dir}/${required_dir}" ]]; then
-      echo "ROCm wheel artifact did not contain ${required_dir}/" >&2
-      return 1
-    fi
-  done
-
-  echo "--- Installing ROCm wheel into pod environment"
-  python3 -m pip install --no-deps --force-reinstall "${wheels[0]}" || return 1
-
-  echo "--- Preparing ${workspace_dir} from artifact"
+  echo "--- Preparing ${workspace_dir} from ${staged_dir}"
   find "${workspace_dir}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
-  tar -C "${wheel_dir}" \
-    --exclude='*.whl' \
-    --exclude='.vllm-ci-artifact' \
-    --exclude='./.vllm-ci-artifact' \
-    -cf - . | tar --no-same-owner -C "${workspace_dir}" -xf - || return 1
+  cp -a "${staged_dir}/." "${workspace_dir}/" || return 1
   if [[ ! -d "${workspace_dir}/tests" ]]; then
     echo "Failed to stage the native test workspace" >&2
     return 1
   fi
 
-  # The ROCm artifact intentionally contains only the installed wheel and the
-  # test workspace. The Python-only compilation job also needs setup.py and the
-  # vllm source tree, so overlay the matching Buildkite checkout for that job.
   if [[ "${test_commands}" == *python_only_compile.sh* ]]; then
-    checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
-    if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
-      echo "Python-only native CI requires BUILDKITE_BUILD_CHECKOUT_PATH" >&2
-      return 1
-    fi
-    if ! git -c "safe.directory=${checkout}" -C "${checkout}" \
-      rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      echo "Buildkite checkout is not a Git worktree: ${checkout}" >&2
-      return 1
-    fi
-    checkout_commit=$(
-      git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse HEAD
-    ) || return 1
-    if [[ "${checkout_commit}" != "${recorded_commit}" ]]; then
-      echo "Buildkite checkout ${checkout_commit} does not match ROCm artifact ${recorded_commit}" >&2
-      return 1
-    fi
-
-    # setup.py normally derives this from .git via setuptools-scm. The native
-    # source overlay deliberately excludes Git metadata, so preserve the exact
-    # version from the already installed, artifact-matched wheel.
-    VLLM_VERSION_OVERRIDE=$(
-      python3 -c 'import importlib.metadata as m; print(m.version("vllm"))'
-    ) || return 1
-    export VLLM_VERSION_OVERRIDE
-    VLLM_PRECOMPILED_WHEEL_LOCATION="${wheels[0]}"
-    export VLLM_PRECOMPILED_WHEEL_LOCATION
-    echo "INFO: native Python-only wheel=${VLLM_PRECOMPILED_WHEEL_LOCATION}"
-
-    echo "--- Overlaying full source checkout for Python-only compilation"
-    # Archive the verified commit instead of copying the worktree so dirty or
-    # untracked agent files cannot contaminate the artifact-matched workspace.
-    git -c "safe.directory=${checkout}" -C "${checkout}" \
-      archive --format=tar "${recorded_commit}" \
-      | tar --no-same-owner -C "${workspace_dir}" -xf - || return 1
-    for required_source in setup.py pyproject.toml vllm; do
-      if [[ ! -e "${workspace_dir}/${required_source}" ]]; then
-        echo "Full source checkout is missing ${required_source}" >&2
-        return 1
-      fi
-    done
+    # The image does not keep the wheel; download it from the image build.
+    wheel_name=$(tr -d '\r\n' < /opt/vllm-ci/wheel-filename.txt) || return 1
+    artifact_work_dir=$(mktemp -d -t vllm-rocm-wheel.XXXXXX) || return 1
+    buildkite-agent artifact download "artifacts/vllm-rocm-wheel/${wheel_name}*" \
+      "${artifact_work_dir}" --step "${VLLM_CI_ARTIFACT_STEP:-image-build-amd}" || return 1
+    (cd "${artifact_work_dir}/artifacts/vllm-rocm-wheel" \
+      && sha256sum -c "${wheel_name}.sha256") || return 1
+    overlay_python_only_source "${image_commit}" \
+      "${artifact_work_dir}/artifacts/vllm-rocm-wheel/${wheel_name}" \
+      "${workspace_dir}" || return 1
   fi
-
-  return 0
 }
 
 initialize_native_environment() {
@@ -534,7 +308,7 @@ initialize_native_environment() {
   local hf_mount=""
 
   if [[ "$(id -u)" -ne 0 ]]; then
-    echo "Native ROCm CI currently requires the ci_base container to run as root" >&2
+    echo "Native ROCm CI currently requires the CI image to run as root" >&2
     return 1
   fi
 
@@ -1538,18 +1312,18 @@ if is_native_runtime; then
   handle_pytest_exit "$?"
 fi
 
-# --- GPU initialization for legacy Docker execution ---
+# --- GPU initialization for Docker execution ---
 echo "--- ROCm info"
 rocminfo
 
 # --- Docker status ---
 report_docker_usage
 
-# --- Pull test image ---
-echo "--- Pulling container"
-image_name="${VLLM_CI_FALLBACK_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-local}}"
-artifact_work_dir=""
+# The per-build test image; agent hooks also read DOCKER_IMAGE_NAME.
+image_name="${DOCKER_IMAGE_NAME:-rocm/vllm-ci:build-${BUILDKITE_BUILD_ID:-local}}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
+# The image stages the test workspace under /opt/vllm-ci/workspace.
+stage_workspace="mkdir -p /vllm-workspace && cp -a /opt/vllm-ci/workspace/. /vllm-workspace/"
 
 # shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
 remove_docker_container() {
@@ -1560,37 +1334,13 @@ remove_docker_container() {
   if [[ "${VLLM_CI_REMOVE_TEST_IMAGE:-0}" == "1" ]]; then
     docker image rm -f "${image_name}" || true
   else
-    # Keep images by default so later jobs on the same AMD node can reuse layers.
+    # Keep images by default so later jobs on the same AMD node reuse the
+    # shared runtime-ci layers and only pull the per-build vLLM layer.
     echo "Keeping ROCm test image locally: ${image_name}"
-  fi
-  if [[ -n "${artifact_work_dir}" ]]; then
-    rm -rf "${artifact_work_dir}"
   fi
   handle_amd_runner_exit "${exit_code}"
 }
 trap remove_docker_container EXIT
-
-# python_only_compile.sh runs `python setup.py develop` and needs the full repo tree
-# under /vllm-workspace (Dockerfile.rocm test stage: mkdir src && mv vllm).
-# The ROCm wheel artifact tarball only ships a thin tree (tests, etc.), so
-# artifact images cannot satisfy that test — use the full rocm/vllm-ci image.
-_cmd_probe="${VLLM_TEST_COMMANDS:-}"
-if [[ -z "${_cmd_probe}" ]]; then
-  _cmd_probe="$*"
-fi
-if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" == "1" && "${_cmd_probe}" == *python_only_compile.sh* ]]; then
-  echo "INFO: disabling VLLM_CI_USE_ARTIFACTS for python_only_compile (requires full /vllm-workspace tree)"
-  export VLLM_CI_USE_ARTIFACTS=0
-fi
-unset -v _cmd_probe
-
-if ! prepare_artifact_image; then
-  echo "Using full ROCm CI image: ${image_name}"
-  docker pull "${image_name}" || exit 1
-fi
-
-# --- Prepare commands ---
-echo "--- Running container"
 
 HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
@@ -1643,33 +1393,19 @@ fi
 
 echo "Final commands: $commands"
 
-# Match native CPU jobs even when the container can see AMD devices.
-cpu_platform_env=()
-if [[ "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" == "0" \
-  && "$commands" != *python_only_compile.sh* ]]; then
-  cpu_platform_env=(-e "VLLM_TARGET_DEVICE=cpu")
+if [[ "$commands" == *python_only_compile.sh* ]]; then
+  # It needs the same-build wheel and a source checkout; see prepare_native_workspace.
+  echo "Error: python_only_compile.sh requires native execution (dind: false)." >&2
+  exit 1
 fi
 
-standalone_merge_base_env=()
-if [[ "$commands" == *python_only_compile.sh* ]]; then
-  # The ROCm test image often ships /vllm-workspace without .git. Resolve the
-  # wheels.vllm.ai commit from the agent checkout for this test only.
-  vllm_standalone_merge_base=""
-  checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
-  if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
-    checkout="."
-  fi
-  # Pass safe.directory per-command because Buildkite uses mixed user IDs.
-  if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    vllm_standalone_merge_base="$(
-      git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
-    )"
-  fi
-  if [[ -z "${vllm_standalone_merge_base}" ]]; then
-    vllm_standalone_merge_base="${BUILDKITE_COMMIT:-}"
-  fi
-  echo "INFO: passing CI_STANDALONE_MERGE_BASE into container: ${vllm_standalone_merge_base}"
-  standalone_merge_base_env=(-e "CI_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}")
+echo "--- Pulling container"
+docker pull "${image_name}" || exit 1
+
+# Match native CPU jobs even when the container can see AMD devices.
+cpu_platform_env=()
+if [[ "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" == "0" ]]; then
+  cpu_platform_env=(-e "VLLM_TARGET_DEVICE=cpu")
 fi
 
 MYPYTHONPATH="/vllm-workspace"
@@ -1679,7 +1415,7 @@ container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
 container_job_id_short="${container_job_id:0:8}"
 CONTAINER_TMPDIR="/tmp/vllm-${container_job_id_short}"
 CONTAINER_CACHE_ROOT="/tmp/vllm-buildkite-${container_job_id}/cache"
-CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TIKTOKEN_RS_CACHE_DIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
+CONTAINER_PREFLIGHT="${stage_workspace} && mkdir -p \"\$TMPDIR\" \"\$TIKTOKEN_RS_CACHE_DIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
 
 # Verify GPU access
 render_gid=$(getent group render | cut -d: -f3)
@@ -1730,7 +1466,7 @@ if is_multi_node "$commands"; then
       command_node_0=${node0[i]//\"/}
       command_node_1=${node1[i]//\"/}
 
-      step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
+      step_cmd="./.buildkite/scripts/run-multi-node-test.sh / 2 2 ${image_name} '${stage_workspace} && cd /vllm-workspace/tests && ${command_node_0}' '${stage_workspace} && cd /vllm-workspace/tests && ${command_node_1}'"
       echo "COMMANDS: ${step_cmd}"
       composite_command="${composite_command} && ${step_cmd}"
     done
@@ -1805,7 +1541,6 @@ else
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
     "${cpu_platform_env[@]}" \
-    "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}" || exit_code=$?

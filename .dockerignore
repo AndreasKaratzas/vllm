@@ -1,6 +1,5 @@
 /.venv
 /build
-/artifacts/vllm-rocm-install/
 /bake-config-build-*.json
 /wheel-export/
 dist

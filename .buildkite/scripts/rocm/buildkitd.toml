@@ -1,0 +1,29 @@
+# BuildKit daemon config for ROCm CI builders (docker-container driver).
+# Without it the builder cache grows until the agent disk fills. Percentages
+# are of the filesystem holding the BuildKit state.
+[worker.oci]
+  gc = true
+  # Never shrink below this, so a warm builder keeps its compile caches.
+  reservedSpace = "10%"
+  # Start collecting at this usage, or when free space drops below minFreeSpace.
+  maxUsedSpace = "60%"
+  minFreeSpace = "20%"
+
+  # Sources, git checkouts and cache mounts (pip/uv/ccache) are cheap to
+  # recreate relative to their size.
+  [[worker.oci.gcpolicy]]
+    filters = ["type==source.local", "type==source.git.checkout", "type==exec.cachemount"]
+    keepDuration = "72h"
+    maxUsedSpace = "20%"
+
+  # Everything not used for a week.
+  [[worker.oci.gcpolicy]]
+    keepDuration = "168h"
+    maxUsedSpace = "40%"
+
+  # Hard ceiling.
+  [[worker.oci.gcpolicy]]
+    all = true
+    reservedSpace = "10%"
+    maxUsedSpace = "60%"
+    minFreeSpace = "20%"
