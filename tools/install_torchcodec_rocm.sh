@@ -6,11 +6,12 @@
 # The PyPI wheel is built against upstream PyTorch and has ABI mismatches with
 # ROCm's custom torch build, so we must compile from source.
 
-set -e
+set -eo pipefail
 
 TORCHCODEC_REPO="${TORCHCODEC_REPO:-https://github.com/pytorch/torchcodec.git}"
 # Pin to a specific release for reproducibility; update as needed.
 TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-v0.10.0}"
+TORCHCODEC_COMMIT="${TORCHCODEC_COMMIT:-}"
 # Cache directory for pre-built wheels to avoid redundant recompilation.
 TORCHCODEC_WHEEL_CACHE="${TORCHCODEC_WHEEL_CACHE:-/root/.cache/torchcodec-wheels}"
 
@@ -21,24 +22,6 @@ if python3 -c "from torchcodec.decoders import VideoDecoder" 2>/dev/null; then
     echo "TorchCodec is already installed and working. Skipping."
     exit 0
 fi
-
-# Try to install from cached wheel first
-ARCH_TAG="${PYTORCH_ROCM_ARCH:-all}"
-# Normalize arch tag (replace ; with _) for use in filename
-ARCH_TAG="${ARCH_TAG//;/_}"
-CACHED_WHEEL="${TORCHCODEC_WHEEL_CACHE}/torchcodec-${TORCHCODEC_BRANCH}-${ARCH_TAG}.whl"
-
-if [ -f "$CACHED_WHEEL" ]; then
-    echo "Found cached wheel: $CACHED_WHEEL"
-    pip install "$CACHED_WHEEL" && {
-        echo "Installed from cached wheel."
-        echo "=== TorchCodec installation complete ==="
-        exit 0
-    }
-    echo "Cached wheel installation failed, rebuilding from source..."
-fi
-
-echo "TorchCodec not found. Installing from source..."
 
 # Install system dependencies (FFmpeg + pkg-config) if not already present.
 # The Docker test image pre-installs these, so this is a fallback for other envs.
@@ -68,12 +51,77 @@ if ! pkg-config --exists libavcodec libavformat libavutil libswscale libavdevice
     install_system_deps
 fi
 
+# Resolve custom refs once; the default release is pinned without a network lookup.
+if [ -z "$TORCHCODEC_COMMIT" ]; then
+    if [ "$TORCHCODEC_REPO" = "https://github.com/pytorch/torchcodec.git" ] \
+        && [ "$TORCHCODEC_BRANCH" = "v0.10.0" ]; then
+        TORCHCODEC_COMMIT=0b261b98080925f2b709712a5491a1e8dd817065
+    elif [[ "$TORCHCODEC_BRANCH" =~ ^[0-9a-f]{40}$ ]]; then
+        TORCHCODEC_COMMIT="$TORCHCODEC_BRANCH"
+    else
+        TORCHCODEC_COMMIT=$(git ls-remote "$TORCHCODEC_REPO" \
+            "refs/heads/$TORCHCODEC_BRANCH" "refs/tags/$TORCHCODEC_BRANCH" \
+            "refs/tags/$TORCHCODEC_BRANCH^{}" \
+            | awk '/\^\{\}$/ {peeled=$1} {commit=$1} END {print peeled ? peeled : commit}')
+    fi
+fi
+if [[ ! "$TORCHCODEC_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Error: could not resolve TorchCodec source commit" >&2
+    exit 1
+fi
+
+# Retain the valid wheel basename inside a directory keyed by its build ABI.
+CACHE_KEY=$({
+    printf '%s\n' "$TORCHCODEC_REPO" "$TORCHCODEC_COMMIT" "${PYTORCH_ROCM_ARCH:-all}"
+    sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1
+    python3 - <<'PY' || exit 1
+import importlib.metadata
+import json
+import platform
+import sysconfig
+import torch
+
+print(json.dumps({
+    "python_abi": sysconfig.get_config_var("SOABI"),
+    "machine": platform.machine(),
+    "torch": torch.__version__,
+    "hip": torch.version.hip,
+    "cxx11_abi": torch._C._GLIBCXX_USE_CXX11_ABI,
+    "rocm": sorted(
+        (dist.metadata["Name"], dist.version)
+        for dist in importlib.metadata.distributions()
+        if dist.metadata.get("Name", "").lower().startswith(("rocm", "amd-"))
+    ),
+}, sort_keys=True))
+PY
+    pkg-config --modversion libavcodec libavformat libavutil libswscale libavdevice libavfilter libswresample || exit 1
+    for metadata in /app/versions.txt /etc/rocm-constraints.txt; do
+        if [ -f "$metadata" ]; then sha256sum "$metadata"; fi
+    done
+} | sha256sum | cut -d' ' -f1)
+CACHE_DIR="${TORCHCODEC_WHEEL_CACHE}/${CACHE_KEY}"
+shopt -s nullglob
+CACHED_WHEELS=("${CACHE_DIR}"/torchcodec-*.whl)
+if [ "${#CACHED_WHEELS[@]}" -eq 1 ]; then
+    echo "Found cached wheel: ${CACHED_WHEELS[0]}"
+    if pip install --no-deps "${CACHED_WHEELS[0]}" \
+        && python3 -c "from torchcodec.decoders import VideoDecoder"; then
+        echo "Installed from cached wheel."
+        echo "=== TorchCodec installation complete ==="
+        exit 0
+    fi
+    echo "Cached wheel failed verification, rebuilding from source..."
+fi
+
+echo "TorchCodec not found. Installing from source..."
+
 # Install Python build dependencies
 echo "Installing Python build dependencies..."
 pip install pybind11 setuptools wheel
 
 # Set pybind11 cmake path so CMake can find it
-export pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
+pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
+export pybind11_DIR
 export CMAKE_PREFIX_PATH="${pybind11_DIR}:${CMAKE_PREFIX_PATH}"
 echo "pybind11_DIR set to: $pybind11_DIR"
 
@@ -95,8 +143,11 @@ trap cleanup EXIT
 
 # Clone and build
 cd "$BUILD_DIR"
-echo "Cloning TorchCodec from $TORCHCODEC_REPO (branch: $TORCHCODEC_BRANCH)..."
-git clone --depth 1 --branch "$TORCHCODEC_BRANCH" "$TORCHCODEC_REPO" torchcodec
+echo "Fetching TorchCodec from $TORCHCODEC_REPO (commit: $TORCHCODEC_COMMIT)..."
+git init -q torchcodec
+git -C torchcodec remote add origin "$TORCHCODEC_REPO"
+git -C torchcodec fetch --depth 1 origin "$TORCHCODEC_COMMIT"
+git -C torchcodec checkout --detach FETCH_HEAD
 
 cd torchcodec
 
@@ -123,16 +174,15 @@ if [ -z "$BUILT_WHEEL" ]; then
     exit 1
 fi
 
-pip install "$BUILT_WHEEL"
-
-# Cache the wheel for future runs
-mkdir -p "$TORCHCODEC_WHEEL_CACHE"
-cp "$BUILT_WHEEL" "$CACHED_WHEEL"
-echo "Cached wheel to: $CACHED_WHEEL"
+pip install --no-deps "$BUILT_WHEEL"
 
 # Verify installation
 echo "Verifying installation..."
 if python3 -c "from torchcodec.decoders import VideoDecoder; print('TorchCodec installed successfully!')"; then
+    mkdir -p "$CACHE_DIR"
+    rm -f "$CACHE_DIR"/torchcodec-*.whl
+    cp "$BUILT_WHEEL" "$CACHE_DIR/"
+    echo "Cached wheel to: $CACHE_DIR/$(basename "$BUILT_WHEEL")"
     echo "=== TorchCodec installation complete ==="
 else
     echo "Error: TorchCodec installation failed verification"

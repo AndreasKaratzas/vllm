@@ -279,7 +279,8 @@ target "test-rocm-ci" {
     IMAGE_TAG,
     IMAGE_TAG_LATEST,
   ])
-  output = ["type=registry"]
+  # Inherited layers already use the canonical dependency encoding.
+  output = ["type=registry,compression=zstd,compression-level=3,oci-mediatypes=true"]
 }
 
 # Validate the test image in the shared BuildKit graph and export only the
@@ -401,7 +402,8 @@ target "ci-base-rocm-ci" {
   cache-to = ["type=inline"]
   tags     = compact([CI_BASE_IMAGE_TAG])
   attest   = ["type=provenance,disabled=true"]
-  output   = ["type=registry"]
+  # Encode dependency layers once; commit images reuse these exact blobs.
+  output   = ["type=registry,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true"]
 }
 
 # Group for ci_base builds -- exports dependency stage caches alongside the

@@ -1,3 +1,7 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+ARG UBUNTU_IMAGE=scratch
+ARG OS_IMAGE=scratch
+
 ARG BASE_IMAGE=ubuntu:22.04
 ARG PYTHON_VERSION=3.12
 ARG TORCH_VERSION=2.12.0+rocm10.0.0
@@ -34,6 +38,186 @@ ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 
+# BEGIN vllm-rocm dependency-producer
+# Dependency refresh producer. All named source contexts are local BuildKit
+# targets from PR #58761, not published base/ci_base images.
+
+FROM ${UBUNTU_IMAGE} AS seed-os
+ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PIP_COMPILE=0
+RUN . /etc/os-release && test "$ID" = ubuntu && test "$VERSION_ID" = 22.04 \
+    && test "$(uname -m)" = x86_64 \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common ca-certificates \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 python3.12-venv python3.12-dev build-essential pkg-config \
+    libc-bin libstdc++6 libgcc-s1 libgomp1 libtinfo6 libedit2 \
+    libgfortran5 libopenmpi3 libpci3 liblzma5 libdrm2 libnuma1 \
+    libjpeg-turbo8 libsox3 libsox-fmt-all ffmpeg libaio1 libgrpc++1 \
+    libprotobuf23 libcpprest2.10 libsodium23 libsqlite3-0 libfmt8 \
+    libmsgpackc2 libsuitesparseconfig5 libcholmod3 libumfpack5 libspqr2 \
+    libnl-3-200 libnl-route-3-200 libudev1 \
+    && ln -s /usr/bin/python3.12 /usr/local/bin/python3 \
+    && apt-get purge -y software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM seed-os AS rdma-build
+ARG RDMA_COMMIT=31af04ec84378724cb6256814d4ffde359a7123b
+ARG MAX_JOBS=16
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git build-essential cmake ninja-build pkg-config libudev-dev \
+    libnl-3-dev libnl-route-3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && git init /src && git -C /src remote add origin https://github.com/linux-rdma/rdma-core.git \
+    && git -C /src fetch --depth=1 origin "${RDMA_COMMIT}" \
+    && git -C /src checkout --detach FETCH_HEAD \
+    && test "$(git -C /src rev-parse HEAD)" = "${RDMA_COMMIT}" \
+    && cmake -S /src -B /src/build -GNinja -DCMAKE_INSTALL_PREFIX=/usr \
+        -DNO_MAN_PAGES=1 -DNO_PYVERBS=1 \
+    && cmake --build /src/build --parallel "${MAX_JOBS}" \
+    && DESTDIR=/rdma-runtime cmake --install /src/build --strip \
+    && rm -rf /rdma-runtime/usr/share/man /rdma-runtime/usr/lib/cmake \
+    && find /rdma-runtime -name '*.a' -delete
+
+FROM seed-os AS runtime-seed
+ARG RDMA_COMMIT=31af04ec84378724cb6256814d4ffde359a7123b
+COPY --from=rdma-build /rdma-runtime/ /
+RUN ldconfig && mkdir -p /usr/share/vllm-runtime-seed \
+    && dpkg-query -W > /usr/share/vllm-runtime-seed/apt-packages.txt \
+    && printf '%s\n' "${RDMA_COMMIT}" > /usr/share/vllm-runtime-seed/rdma-commit.txt \
+    && printf '%s\n' 'ROCTRACER_MAX_EVENTS=10000000' > /etc/kineto.conf \
+    && python3 -c 'import json,platform,sysconfig; print(json.dumps({"python":platform.python_version(),"abi":sysconfig.get_config_var("SOABI")}))' \
+        > /usr/share/vllm-runtime-seed/python.json
+
+FROM framework-reference AS resolve
+ARG MAX_JOBS=16
+ENV MAX_JOBS=${MAX_JOBS}
+COPY --from=framework-wheels /app/debs/ /source-wheels/
+COPY --from=mori-build /app/install/ /source-wheels/
+COPY --from=nixl-build /app/install/ /source-wheels/
+COPY --from=deepep-build /app/deep_install/ /source-wheels/
+COPY --from=lmcache-build /app/install/ /source-wheels/
+COPY tools/vllm-rocm/produce_runtime.py /producer/produce_runtime.py
+COPY tools/install_torchcodec_rocm.sh /producer/install_torchcodec_rocm.sh
+COPY requirements/common.txt requirements/rocm.txt /producer/requirements/
+COPY --from=runtime-seed /usr/share/vllm-runtime-seed/ /out/provenance/seed/
+ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950
+ARG ROCM_SDK_VERSION=10.0.0
+ARG TORCH_VERSION=2.12.0+rocm10.0.0
+ARG TORCHVISION_VERSION=0.27.0+rocm10.0.0
+ARG TORCHAUDIO_VERSION=2.11.0+rocm10.0.0
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL=https://stable.repo.amd.com/rocm/whl-next/
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://nightly.repo.amd.com/rocm/whl-next/
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_COMPILE=0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
+    libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,id=vllm-rocm-producer-pip,target=/root/.cache/pip,sharing=locked \
+    TORCHCODEC_WHEEL_CACHE=/tmp/torchcodec-wheels \
+    bash /producer/install_torchcodec_rocm.sh \
+    && find /tmp/torchcodec-wheels -name '*.whl' -exec cp '{}' /source-wheels/ \; \
+    && python3 -m pip download --no-deps --no-build-isolation --no-binary=:all: \
+        fastsafetensors==0.3.3 --dest /source-tarballs \
+    && python3 -m pip wheel --no-deps --no-build-isolation --no-binary fastsafetensors \
+        /source-tarballs/fastsafetensors-*.tar.gz --wheel-dir /source-wheels
+RUN --mount=type=cache,id=vllm-rocm-producer-pip,target=/root/.cache/pip,sharing=locked \
+    --mount=type=bind,from=framework-reference,source=/,target=/reference \
+    --mount=type=bind,from=fa-build,source=/app/flash-attention,target=/refs/fa \
+    --mount=type=bind,from=aiter-build,source=/app/aiter,target=/refs/aiter \
+    --mount=type=bind,from=triton-build,source=/app/triton,target=/refs/triton \
+    --mount=type=bind,from=mori-build,source=/app/mori,target=/refs/mori \
+    --mount=type=bind,from=nixl-build,source=/opt/nixl,target=/refs/nixl \
+    --mount=type=bind,from=nixl-build,source=/usr/local/src/ucx,target=/refs/ucx \
+    --mount=type=bind,from=deepep-build,source=/app/DeepEP,target=/refs/deepep \
+    python3 /producer/produce_runtime.py _resolve --output /out \
+        --source-wheels /source-wheels --reference /reference \
+        --requirements /producer/requirements/rocm.txt \
+        --arches "${PYTORCH_ROCM_ARCH}" --sdk-version "${ROCM_SDK_VERSION}" \
+        --torch-version "${TORCH_VERSION}" --vision-version "${TORCHVISION_VERSION}" \
+        --audio-version "${TORCHAUDIO_VERSION}" \
+        --index "${ROCM_RELEASE_WHEELS_MULTIARCH_URL}" \
+        --index "${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL}"
+
+FROM runtime-seed AS validate
+COPY --from=resolve /out/wheelhouse/ /wheelhouse/
+COPY tools/vllm-rocm/produce_runtime.py /producer/produce_runtime.py
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_COMPILE=0
+RUN --network=none python3 -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install --no-index --no-deps --no-compile \
+        --find-links /wheelhouse --require-hashes -r /wheelhouse/requirements.lock
+ENV SDK_DEV=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel \
+    SDK_CORE=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core
+ENV PATH=/opt/venv/bin:$SDK_DEV/bin:$SDK_DEV/lib/llvm/bin:$SDK_CORE/bin:$PATH \
+    ROCM_PATH=$SDK_DEV ROCM_HOME=$SDK_DEV HIP_PATH=$SDK_DEV \
+    HIP_CLANG_PATH=$SDK_DEV/lib/llvm/bin \
+    HIP_DEVICE_LIB_PATH=$SDK_CORE/lib/llvm/amdgcn/bitcode \
+    LD_LIBRARY_PATH=$SDK_DEV/lib:$SDK_DEV/lib/rocm_sysdeps/lib:$SDK_CORE/lib:$SDK_CORE/lib/rocm_sysdeps/lib \
+    HSA_NO_SCRATCH_RECLAIM=1 ROCPROFILER_QUEUE_INTERPOSITION=0
+RUN --network=none if command -v rocm-sdk >/dev/null; then rocm-sdk init; fi
+# Apply patched SDK files after wheel installation and SDK initialization.
+COPY --from=resolve /out/platform/ /
+RUN --network=none ldconfig \
+    && /opt/venv/bin/python /producer/produce_runtime.py _validate \
+        --site-packages /opt/venv/lib/python3.12/site-packages --output /validation
+
+FROM scratch AS export-artifacts
+COPY --from=resolve /out/wheelhouse/ /wheelhouse/
+COPY --from=resolve /out/platform/ /platform/
+COPY --from=resolve /out/provenance/ /provenance/
+COPY --from=validate /validation/ /provenance/validation/
+# END vllm-rocm dependency-producer
+
+# BEGIN vllm-rocm runtime
+# Offline assembly. OS_IMAGE must already contain Python 3.12 (with venv),
+# runtime system libraries, and ldconfig. See docs/design/rocm_ci_runtime.md.
+
+FROM ${OS_IMAGE} AS runtime-install
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN --network=none python3 -c 'import sys; assert sys.version_info[:2] == (3, 12)' \
+    && python3 -m venv /opt/venv
+RUN --network=none --mount=type=bind,from=wheelhouse,source=/,target=/wheelhouse \
+    /opt/venv/bin/python -m pip install --no-index --no-deps --no-compile \
+        --find-links /wheelhouse \
+        --require-hashes -r /wheelhouse/requirements.lock
+ENV PATH=/opt/venv/bin:$PATH
+RUN --network=none if command -v rocm-sdk >/dev/null; then rocm-sdk init; fi
+COPY --from=installer /split_runtime.py /tmp/split_runtime.py
+RUN --network=none python /tmp/split_runtime.py
+
+FROM ${OS_IMAGE} AS runtime
+ARG DEPENDENCY_KEY
+ARG SOURCE_DATE_EPOCH
+LABEL vllm.rocm.dependency_key=${DEPENDENCY_KEY}
+ENV PATH=/opt/venv/bin:/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/bin:/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib/llvm/bin:/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SITE_PACKAGES=/opt/venv/lib/python3.12/site-packages \
+    SDK_DEV=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel \
+    SDK_CORE=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core \
+    ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel \
+    ROCM_HOME=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel \
+    HIP_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel \
+    HIP_CLANG_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib/llvm/bin \
+    HIP_DEVICE_LIB_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib/llvm/amdgcn/bitcode \
+    LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib:/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib/rocm_sysdeps/lib:/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib:/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib/rocm_sysdeps/lib \
+    HSA_NO_SCRATCH_RECLAIM=1 ROCPROFILER_QUEUE_INTERPOSITION=0 \
+    PYTORCH_NVML_BASED_CUDA_CHECK=1 HSA_ENABLE_IPC_MODE_LEGACY=1 \
+    UCX_RMA_PPLN_ENABLE=y UCX_ROCM_COPY_SIGPOOL_MAX_ELEMS=inf \
+    HIP_FORCE_DEV_KERNARG=1 SAFETENSORS_FAST_GPU=1 TOKENIZERS_PARALLELISM=false \
+    MIOPEN_DEBUG_CONV_DIRECT=0 MIOPEN_DEBUG_CONV_GEMM=0 \
+    KINETO_CONFIG=/etc/kineto.conf
+COPY --from=runtime-install /runtime-payloads/sdk/ /opt/venv/
+COPY --from=runtime-install /runtime-payloads/torch/ /opt/venv/
+COPY --from=runtime-install /runtime-payloads/triton/ /opt/venv/
+COPY --from=runtime-install /runtime-payloads/python/ /opt/venv/
+# Apply patches after stable payloads so CLR/loader updates preserve SDK blobs.
+COPY --from=platform /opt/ /opt/
+COPY --from=platform /etc/ /etc/
+COPY --from=installer /install_artifacts.py /opt/vllm-rocm/install_artifacts.py
+RUN --network=none ldconfig && python -m pip check \
+    && printf '%s\n' "${DEPENDENCY_KEY}" > /opt/venv/.vllm-runtime-key
+# END vllm-rocm runtime
+
 FROM ${BASE_IMAGE} AS base
 
 ARG PYTORCH_ROCM_ARCH
@@ -62,9 +246,11 @@ ENV PYTHON_VERSION=${PYTHON_VERSION}
 RUN mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_COMPILE=0
 
 # Install Python and other dependencies
-RUN apt-get update -y \
+RUN --mount=type=cache,id=vllm-rocm-base-pip,target=/root/.cache/pip,sharing=locked \
+    apt-get update -y \
     && apt-get install -y software-properties-common build-essential git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config libdrm-dev libnuma-dev kmod \
     && for i in 1 2 3; do \
         add-apt-repository -y ppa:deadsnakes/ppa && break || \
@@ -79,14 +265,16 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11==3.0.4 Cython
+RUN --mount=type=cache,id=vllm-rocm-base-pip,target=/root/.cache/pip,sharing=locked \
+    pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11==3.0.4 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install ROCm SDK via TheRock
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
 ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 ARG ROCM_SDK_VERSION
-RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+RUN --mount=type=cache,id=vllm-rocm-base-pip,target=/root/.cache/pip,sharing=locked \
+    pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
@@ -95,7 +283,8 @@ RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
 ARG TORCH_VERSION
 ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
-RUN pip install \
+RUN --mount=type=cache,id=vllm-rocm-base-pip,target=/root/.cache/pip,sharing=locked \
+    pip install \
     --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
     "torch==${TORCH_VERSION}" \
@@ -112,7 +301,8 @@ RUN pip install \
 # For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
 # PyTorch needs to run on that specific chip.
 SHELL ["/bin/bash", "-c"]
-RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
+RUN --mount=type=cache,id=vllm-rocm-base-pip,target=/root/.cache/pip,sharing=locked \
+    TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
     && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
@@ -126,7 +316,8 @@ RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
 RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \
          "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack-.kpack"
 
-RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
+RUN --mount=type=cache,id=vllm-rocm-base-pip,target=/root/.cache/pip,sharing=locked \
+    cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
 ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi
 
 # TheRock runtime fixes
@@ -410,6 +601,7 @@ RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
     && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"
 
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
+    --mount=type=cache,id=vllm-rocm-base-pip,target=/root/.cache/pip,sharing=locked \
     pip install /install/*.whl \
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}" \

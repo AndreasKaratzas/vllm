@@ -1,0 +1,17 @@
+# Apply only to a dedicated ROCm builder. Budgets need tuning to its disk.
+[worker.oci]
+  gc = true
+  reservedSpace = "64GB"
+  maxUsedSpace = "256GB"
+  minFreeSpace = "64GB"
+
+  [[worker.oci.gcpolicy]]
+    filters = ["type==source.local", "type==source.git.checkout"]
+    keepDuration = "48h"
+    maxUsedSpace = "16GB"
+
+  [[worker.oci.gcpolicy]]
+    keepDuration = "168h"
+    reservedSpace = "64GB"
+    maxUsedSpace = "256GB"
+    minFreeSpace = "64GB"

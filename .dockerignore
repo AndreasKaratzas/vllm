@@ -1,4 +1,11 @@
 /.venv
+/.env
+/.env.*
+/.netrc
+/.aws
+/.ssh
+/.kube
+/.docker/config.json
 /build
 /artifacts/vllm-rocm-install/
 /bake-config-build-*.json

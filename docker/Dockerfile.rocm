@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # default base image
 ARG REMOTE_VLLM="0"
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
@@ -30,6 +31,167 @@ ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
+
+ARG RUNTIME_IMAGE=scratch
+
+# BEGIN vllm-rocm commit-build
+# Local-only wheel producer. All dependency inputs are frozen by build_commit.py.
+FROM ${RUNTIME_IMAGE} AS wheel-build-tools
+ARG DEPENDENCY_KEY
+ARG PYTORCH_ROCM_ARCH
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_NO_INDEX=1 PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_CONFIG_FILE=/dev/null \
+    PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+RUN --network=none test "$(cat /opt/venv/.vllm-runtime-key)" = "${DEPENDENCY_KEY}"
+# This is a complete, distro-compatible .deb dependency closure; never apt-resolve.
+RUN --network=none --mount=type=bind,from=native_debs,source=/,target=/native-debs \
+    dpkg -i /native-debs/*.deb && dpkg --audit
+RUN --network=none /opt/venv/bin/python -m venv /opt/build-venv \
+    && printf '%s\n' "import site; site.addsitedir('/opt/venv/lib/python3.12/site-packages')" \
+       > /opt/build-venv/lib/python3.12/site-packages/runtime.pth
+RUN --network=none --mount=type=bind,from=build_wheels,source=/,target=/build-wheels \
+    --mount=type=bind,from=build_manifest,source=/build-requirements.lock,target=/build-requirements.lock \
+    /opt/build-venv/bin/python -m pip install --no-index --no-deps --no-compile --ignore-installed \
+        --require-hashes --find-links /build-wheels -r /build-requirements.lock \
+    && /opt/build-venv/bin/python -m pip check \
+    && /opt/build-venv/bin/python -c 'import torch; assert torch.version.hip, "runtime must provide ROCm torch"'
+ENV PATH=/opt/build-venv/bin:$PATH VLLM_TARGET_DEVICE=rocm \
+    CCACHE_COMPILERCHECK=content
+WORKDIR /app/vllm
+
+# Rust and HIP/C++ remain independent: only the package stage combines them.
+FROM wheel-build-tools AS wheel-rust-cache
+ARG RUSTUP_TOOLCHAIN
+ARG SOURCE_DATE_EPOCH
+ARG MAX_JOBS=4
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo CARGO_NET_OFFLINE=true \
+    RUSTUP_AUTO_INSTALL=0 RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN} \
+    CARGO_BUILD_JOBS=${MAX_JOBS} PATH=/opt/cargo/bin:$PATH \
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+rocm.rust.build.cache \
+    VLLM_RS_BUILD_VERSION=0.0.0+rocm.rust.build.cache
+COPY --from=rust_toolchain /rustup/ /opt/rustup/
+COPY --from=rust_toolchain /cargo/ /opt/cargo/
+COPY --from=cargo_vendor / /opt/cargo-vendor/
+COPY --from=cargo_vendor /config.toml /opt/cargo/config.toml
+COPY --from=rust_source / /app/vllm/
+RUN --network=none rustc --version && cargo --version \
+    && cargo metadata --frozen --manifest-path rust/Cargo.toml --format-version=1 >/dev/null
+RUN --network=none <<'SH'
+set -eu
+cat > /opt/build-rust-offline.py <<'PY'
+import os
+import sys
+sys.path.insert(0, os.getcwd())
+from tools import build_rust
+original_extensions = build_rust.rust_extensions
+def frozen_extensions(**kwargs):
+    extensions = original_extensions(**kwargs)
+    for extension in extensions:
+        extension.cargo_manifest_args = [*extension.cargo_manifest_args, "--frozen"]
+    return extensions
+build_rust.rust_extensions = frozen_extensions
+build_rust.prepare_build_environment()
+build_rust.build_binary(["--release"])
+PY
+/opt/build-venv/bin/python /opt/build-rust-offline.py
+SH
+
+# Reuse source-consistent target/ from the ordinary cached stage, then stamp
+# the exact source version. No persistent target mount crosses Rust revisions.
+FROM wheel-rust-cache AS wheel-rust-build
+COPY --from=version_source /vllm-version.txt /tmp/vllm-version.txt
+RUN --network=none <<'SH'
+set -eu
+export SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-version.txt)"
+export VLLM_RS_BUILD_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION}"
+/opt/build-venv/bin/python /opt/build-rust-offline.py
+mkdir /rust-output
+cp vllm/vllm-rs /rust-output/
+for artifact in vllm/_rust_*.so; do
+    if test -f "$artifact"; then cp "$artifact" /rust-output/; fi
+done
+SH
+
+FROM wheel-build-tools AS wheel-native-build
+ARG PYTORCH_ROCM_ARCH
+ARG MAX_JOBS=4
+ARG SOURCE_DATE_EPOCH
+ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH} MAX_JOBS=${MAX_JOBS} \
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+rocm.csrc.build \
+    TRITON_KERNELS_SRC_DIR=/opt/rocm-triton-kernels \
+    CMAKE_ARGS="-DFETCHCONTENT_FULLY_DISCONNECTED=ON -DFETCHCONTENT_UPDATES_DISCONNECTED=ON"
+COPY --from=triton_kernels / /opt/rocm-triton-kernels/
+COPY --from=native_source / /app/vllm/
+RUN --network=none --mount=type=cache,id=vllm-rocm-commit-ccache,target=/root/.cache/ccache <<'SH'
+set -eu
+command -v ccache
+command -v mold
+export CCACHE_BASEDIR="$PWD" LDFLAGS=-fuse-ld=mold
+# This intermediate wheel contains native extensions only. Its source context
+# excludes Rust; suppress the optional frontend build rather than attempt it.
+mkdir -p requirements
+touch requirements/common.txt requirements/rocm.txt
+/opt/build-venv/bin/python - <<'PY'
+import runpy
+import setuptools
+import sys
+original_setup = setuptools.setup
+def native_setup(**kwargs):
+    kwargs["rust_extensions"] = []
+    return original_setup(**kwargs)
+setuptools.setup = native_setup
+sys.argv = ["setup.py", "bdist_wheel", "--dist-dir=dist"]
+runpy.run_path("setup.py", run_name="__main__")
+PY
+SH
+
+FROM wheel-build-tools AS wheel-package
+ARG SOURCE_DATE_EPOCH
+COPY --from=package_source / /app/vllm/
+COPY --from=version_source /vllm-version.txt /tmp/vllm-version.txt
+COPY --from=wheel-native-build /app/vllm/dist/ /precompiled-wheels/
+COPY --from=wheel-rust-build /rust-output/ /app/vllm/vllm/
+RUN --network=none <<'SH'
+set -eu
+export SETUPTOOLS_SCM_PRETEND_VERSION="$(cat /tmp/vllm-version.txt)"
+export VLLM_RS_BUILD_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION}"
+export VLLM_USE_PRECOMPILED=1 VLLM_REQUIRE_RUST_FRONTEND=1 VLLM_DOCKER_BUILD_CONTEXT=1
+set -- /precompiled-wheels/*.whl
+test "$#" -eq 1
+export VLLM_PRECOMPILED_WHEEL_LOCATION="$1"
+/opt/build-venv/bin/python setup.py bdist_wheel --dist-dir=dist
+test -s vllm/vllm-rs
+SH
+
+FROM scratch AS wheel-export
+COPY --from=wheel-package /app/vllm/dist/*.whl /
+# END vllm-rocm commit-build
+
+# BEGIN vllm-rocm deployment
+# Serving and local CI use the same runtime and hashed commit wheel.
+FROM ${RUNTIME_IMAGE} AS deployment
+ARG DEPENDENCY_KEY
+ARG WHEEL_SHA256
+ARG SOURCE_DATE_EPOCH
+LABEL vllm.rocm.wheel_sha256=${WHEEL_SHA256}
+RUN --network=none --mount=type=bind,from=wheelhouse,source=/,target=/wheelhouse \
+    python /opt/vllm-rocm/install_artifacts.py \
+        --lock /wheelhouse/artifact-lock.json --runtime-key "${DEPENDENCY_KEY}" \
+        --wheel-sha256 "${WHEEL_SHA256}"
+ENTRYPOINT ["vllm", "serve"]
+CMD []
+
+# This target is a local evaluation view, not a third distributed image tier.
+FROM deployment AS deployment-test
+ARG TEST_TOOLS_KEY
+RUN --network=none --mount=type=bind,from=test_wheelhouse,source=/,target=/test-wheelhouse \
+    python /opt/vllm-rocm/install_artifacts.py \
+        --lock /test-wheelhouse/artifact-lock.json --runtime-key "${DEPENDENCY_KEY}" \
+        --test-tools-key "${TEST_TOOLS_KEY}" --target /opt/test-tools
+ENV PYTHONPATH=/opt/test-tools PATH=/opt/test-tools/bin:$PATH
+WORKDIR /vllm-workspace
+ENTRYPOINT ["python", "-m", "pytest"]
+# END vllm-rocm deployment
 
 FROM ${BASE_IMAGE} AS base
 
