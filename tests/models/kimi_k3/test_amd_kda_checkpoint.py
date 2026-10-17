@@ -71,6 +71,8 @@ def _builder(
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=block_size
     )
+    # K3 resolves Triton; the Qwen3.5 stand-in would pick AITER FlyDSL.
+    vllm_config.additional_config = {"gdn_prefill_backend": "triton"}
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     if num_spec:

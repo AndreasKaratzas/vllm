@@ -32,6 +32,8 @@ def _config(adaptive: bool):
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
+    # K3 resolves Triton; the Qwen3.5 stand-in would pick AITER FlyDSL.
+    vllm_config.additional_config = {"gdn_prefill_backend": "triton"}
     vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
     vllm_config.speculative_config = SpeculativeConfig(
         method="ngram",
