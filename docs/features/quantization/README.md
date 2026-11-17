@@ -69,7 +69,11 @@ MarlinExperts runs QuantKey(...) activations as unquantized. Set VLLM_STRICT_QUA
 
 Set `VLLM_STRICT_QUANT_SCHEME=1` (default `0`) to forbid these fallbacks. Kernel selection then skips kernels that would not run the requested activation quantization and continues down the priority list, so it can still land on a slower kernel that does (for example NVFP4 emulation). If no kernel is left, or an explicitly requested `--moe-backend` / `--linear-backend` cannot run the scheme, startup fails with the reason. Humming input-schema fallbacks are forbidden the same way.
 
-Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel.
+Strict mode only covers dropping or changing a requested activation quantization at kernel selection. It does not cover backends that add activation quantization to a weight-only request, or per-shape and per-batch-size fallbacks inside a selected kernel, except for:
+
+- Interleaved, non-SiTU `AITER_MXFP4_BF16` MoE kernels: strict mode keeps BF16 for weight-only requests instead of adding MXFP8 activation quantization. On gfx950, `--quantization-config.moe.activation mxfp8` requests MXFP8 and `--quantization-config.moe.activation null` requests BF16. DeepSeek-V4 A4W4 and SiTUv2 use different activation/layout controls; incompatible online activation overrides are rejected.
+
+`AITER_BF16_FP8_MOE_BOUND` is process-wide. Conflicting BF16/MXFP8 requests for interleaved AITER MXFP4 layers raise in strict mode. In non-strict mode, BF16 takes precedence only when a layer explicitly requested `activation: null` through `moe` or `targets`; otherwise the latest bound applies. Existing user-exported bounds are overwritten, not treated as explicit BF16 requests.
 
 ## Supported Hardware
 
