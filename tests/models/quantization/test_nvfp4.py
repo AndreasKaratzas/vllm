@@ -111,6 +111,8 @@ SM_100_NVFP4_BACKENDS = [
     "torch",
 ]
 
+SM_10X_ONLY_NVFP4_BACKENDS = ["flashinfer_cutedsl", "flashinfer_trtllm", "torch"]
+
 
 @pytest.mark.parametrize("model", ["nvidia/Llama-3.1-8B-Instruct-NVFP4"])
 @pytest.mark.parametrize("eager", EAGER)
@@ -126,10 +128,10 @@ SM_100_NVFP4_BACKENDS = [
     ],
 )
 def test_nvfp4(vllm_runner, model, eager, backend):
-    if backend == "flashinfer_cutedsl" and not (
+    if backend in SM_10X_ONLY_NVFP4_BACKENDS and not (
         current_platform.is_device_capability_family(100)
     ):
-        pytest.skip("The flashinfer_cutedsl backend is only supported on SM10x")
+        pytest.skip(f"The {backend} backend is only supported on SM10x")
 
     if (
         not current_platform.has_device_capability(100)

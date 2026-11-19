@@ -32,6 +32,33 @@ steps:
       - vllm/
       - tests/cuda
 
+- label: ":nvidia: (DGX Spark) [Nightly] Smoke + CUDA Platform"
+  key: platform-tests-dgx-spark
+  automatic_shard: true
+  timeout_in_minutes: 30
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  env:
+    VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+  source_file_dependencies:
+  - vllm/envs.py
+  - vllm/logger.py
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/utils/
+  - tests/cuda
+  - examples/basic/offline_inference/generate.py
+  commands:
+    - nvidia-smi
+    # GB10 memory is shared with the host, and an unset utilization resolves to 1.0.
+    - python3 ../examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.6
+    - pytest -v -s cuda/test_cuda_context.py
+    - pytest -v -s cuda/test_platform_no_cuda_init.py
+    - pytest -v -s cuda/test_cuda_compatibility_path.py
+
 - label: ":nvidia: (H200 MIG 18GB) CUDAGraph"
   device: h200_18gb
   key: cudagraph

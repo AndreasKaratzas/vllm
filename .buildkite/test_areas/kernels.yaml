@@ -881,6 +881,61 @@ steps:
       - amd-smi
       - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation
 
+- label: ":nvidia: (DGX Spark) [Nightly] Kernels (sm_12x subset)"
+  key: kernels-dgx-spark
+  automatic_shard: true
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - csrc/nvfp4_kv_cache_kernels.cu
+  - csrc/quantization/w8a8/cutlass/
+  - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/layers/fusion/
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/model_executor/layers/quantization/utils/nvfp4_emulation_utils.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/utils/flashinfer.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/attention/backends/registry.py
+  - vllm/v1/attention/selector.py
+  - vllm/config/attention.py
+  - vllm/platforms/cuda.py
+  - vllm/_custom_ops.py
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - tests/kernels/utils.py
+  - tests/kernels/moe/utils.py
+  - tests/kernels/attention/test_attention_selector.py
+  - tests/kernels/attention/test_cache.py
+  - tests/kernels/quantization/nvfp4_utils.py
+  - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+  - tests/kernels/quantization/test_nvfp4_quant.py
+  - tests/kernels/quantization/test_nvfp4_scaled_mm.py
+  - tests/kernels/quantization/test_flashinfer_scaled_mm.py
+  - tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+  - tests/kernels/moe/test_nvfp4_moe.py
+  - tests/kernels/moe/test_flashinfer_moe.py
+  commands:
+    - nvidia-smi
+    - pytest -v -s tests/kernels/attention/test_attention_selector.py
+    # The NVFP4 KV writer still swizzles V scales on SM12x (#50084).
+    - pytest -v -s tests/kernels/attention/test_cache.py -k 'nvfp4 and not test_reshape_and_cache_flash'
+    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
+
 - label: ":nvidia: (B200) Gate Linear CuTeDSL Kernels"
   key: kernels-gate-linear-cutedsl-b200
   automatic_shard: true
