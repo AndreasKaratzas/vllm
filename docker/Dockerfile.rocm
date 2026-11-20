@@ -611,16 +611,31 @@ RUN --network=none so="$(python3 -c 'import os, vllm, vllm._C; print(os.path.dir
 FROM test-deps AS test-base
 # AITER nightly: replace the stack's aiter with the newest nightly wheel that fits this image's ROCm,
 # torch and Python (never cached, see the bake file). AITER_SPEC pins a pip spec instead.
+# AITER_GIT_SHA builds a JIT-only AITER wheel from AITER_GIT_REPO at that commit instead, and keeps
+# its source (without CK and HSA blobs) in /opt/aiter-src for AITER's own unit tests.
 ARG AITER_NIGHTLY
 ARG AITER_SPEC
+ARG AITER_GIT_REPO
+ARG AITER_GIT_SHA
 RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.py,target=/tmp/select.py \
     set -e; spec="$AITER_SPEC"; \
+    if [ -z "$spec" ] && [ -n "$AITER_GIT_SHA" ]; then \
+        git init -q /opt/aiter-src && cd /opt/aiter-src \
+        && git fetch -q --depth 1 "$AITER_GIT_REPO" "$AITER_GIT_SHA" && git checkout -q FETCH_HEAD \
+        && git submodule update -q --init --depth 1 3rdparty/composable_kernel \
+        && PREBUILD_KERNELS=0 AITER_USE_SYSTEM_TRITON=1 AITER_PY3_WHEEL=1 \
+           GPU_ARCHS="${AITER_ROCM_ARCH:-gfx942;gfx950}" \
+           pip wheel --no-cache-dir --no-deps --no-build-isolation -w /tmp/aiter-dist . \
+        && git rev-parse HEAD > AITER_SHA && rm -rf .git 3rdparty hsa build aiter_meta ./*.egg-info \
+        && cd / && spec="$(ls /tmp/aiter-dist/amd_aiter-*.whl)" || exit 1; \
+    fi; \
     if [ -z "$spec" ] && [ "$AITER_NIGHTLY" = 1 ]; then \
         out="$(python3 -P /tmp/select.py)" || { echo "$out" >&2; exit 1; }; \
         echo "$out"; spec="$(echo "$out" | head -n 1)"; \
     fi; \
     if [ -n "$spec" ]; then \
         pip install --no-cache-dir --pre --no-deps --force-reinstall "$spec" || exit 1; \
+        rm -rf /tmp/aiter-dist; \
         # --no-deps keeps the stack's torch and triton, but also any requirement the wheel moved past
         # the stack's AITER release (flydsl): AITER refuses to import with an older one. Install what
         # the wheel requires, within the stack's constraints, and fail if any is still unmet. vLLM's

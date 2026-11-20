@@ -1,0 +1,65 @@
+# AITER on compute partitions: an MI355 DPX partition (an SR-IOV VF that reports no partition
+# mode, so AITER infers it) next to whole-chip (SPX) controls.
+# Evaluation branch only. The test image builds AITER from AITER_GIT_REPO at AITER_GIT_SHA
+# (docker/docker-bake-rocm.hcl), JIT-only, and keeps its source in /opt/aiter-src.
+# Optional: run with VLLM_CI_ONLY_STEP_KEYS naming these keys.
+group: AITER Partition Eval
+depends_on:
+  - image-build-amd
+steps:
+- label: ':amd: (MI355 DPX) AITER Partition Eval'
+  key: amd-aiter-partition-eval-mi355-dpx
+  optional: true
+  dind: false
+  device: mi355_dpx
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - tests/rocm/aiter_partition_eval/
+  env:
+    AITER_EVAL_PARTITION: DPX
+    AITER_EVAL_CU: "128"
+    AITER_EVAL_FULL_CHIP_CU: "256"
+    AITER_EVAL_PARTITION_INFERRED: "1"
+  commands:
+  - bash .buildkite/scripts/rocm/aiter_partition_eval.sh
+
+- label: ':amd: (MI355 SPX) AITER Partition Eval'
+  key: amd-aiter-partition-eval-mi355-spx
+  optional: true
+  dind: false
+  device: mi355_1
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - tests/rocm/aiter_partition_eval/
+  env:
+    AITER_EVAL_PARTITION: SPX
+    AITER_EVAL_CU: "256"
+    AITER_EVAL_FULL_CHIP_CU: "256"
+    AITER_EVAL_PARTITION_INFERRED: "0"
+  commands:
+  - bash .buildkite/scripts/rocm/aiter_partition_eval.sh
+
+- label: ':amd: (MI300 SPX) AITER Partition Eval'
+  key: amd-aiter-partition-eval-mi300-spx
+  optional: true
+  dind: false
+  device: mi300_1
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - tests/rocm/aiter_partition_eval/
+  env:
+    AITER_EVAL_PARTITION: SPX
+    AITER_EVAL_CU: "304"
+    AITER_EVAL_FULL_CHIP_CU: "304"
+    AITER_EVAL_PARTITION_INFERRED: "0"
+  commands:
+  - bash .buildkite/scripts/rocm/aiter_partition_eval.sh

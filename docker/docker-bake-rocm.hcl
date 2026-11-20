@@ -14,6 +14,8 @@ variable "CACHE"        { default = "" }       # trusted cache repo (rocm/vllm-c
 variable "CACHE_TO"     { default = "" }       # ref prefix this build writes ("" = none); build.sh sets it per repo
 variable "AITER_SPEC"   { default = "" }       # pins the AITER nightly wheel (pip spec)
 variable "AITER_NIGHTLY" { default = "" }      # "1": test the newest AITER nightly wheel
+variable "AITER_GIT_REPO" { default = "https://github.com/ROCm/aiter.git" }
+variable "AITER_GIT_SHA" { default = "1a61a7a69baddeb4951cc87da9ad1a2a9d33d190" }  # akaratza_partition_eval
 variable "VLLM_VERSION" { default = "" }       # release: image version label (build.sh reuse check)
 variable "CACHE_CI"     { default = true }     # false (PR builds): skip the full ci cache; compile-cache still exports
 variable "BUILDKITE_COMMIT" { default = "" }   # the commit the kernel symbol map is stamped with
@@ -95,6 +97,7 @@ target "_app" {
   dockerfile = "docker/Dockerfile.rocm"
   contexts   = ctx()
   args       = { ARCH = "", AITER_SPEC = AITER_SPEC, AITER_NIGHTLY = AITER_NIGHTLY, VLLM_VERSION = VLLM_VERSION,
+                 AITER_GIT_REPO = AITER_GIT_REPO, AITER_GIT_SHA = AITER_GIT_SHA,
                  SCCACHE_BUCKET_NAME = SCCACHE_BUCKET_NAME, CI_ARCH = CI_ARCH }
   # dev/csrc records are shared. Only release (CACHE = "") writes "release"; only CI "ci" and "compile".
   cache-from = cfrom(CACHE == "" ? ["runtime", "release"] : ["runtime", "ci", "compile"])
