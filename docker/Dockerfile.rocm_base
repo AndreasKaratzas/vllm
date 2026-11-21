@@ -15,6 +15,8 @@ ARG MORI_BRANCH="v1.2.5"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG ROCM_RUNTIME_COMMIT="d90ce21d395045d973cd566f33130ea2eb97c60b" # users/rasmith/10.2/completion_signal_backport: the 10.2.0 release base plus the completion signal work from develop
+# Eval only: head of ROCm/rocm-systems#14385 (rocprofiler-sdk completion signal fix).
+ARG ROCPROFILER_SDK_COMMIT="00caebd435d79eef426495f5aac15fb55819ced7"
 
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
@@ -284,6 +286,35 @@ RUN mkdir -p /staging/lib \
     && cp -P /rocr-install/lib/libhsa-runtime64.so* /staging/lib/ \
     && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
     && ls -l /staging/lib
+# rocprofiler-sdk from ROCm/rocm-systems#14385, built against the ROCr above. Only the
+# library and its headers ship: kernrec builds against the headers and requires them to
+# match the runtime version.
+ARG ROCPROFILER_SDK_COMMIT
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init -q /src-rps && cd /src-rps \
+    && git remote add origin ${ROCM_SYSTEMS_REPO} \
+    && git config remote.origin.promisor true \
+    && git config remote.origin.partialclonefilter blob:none \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocprofiler-sdk shared cmake \
+    && git fetch --filter=blob:none --depth 1 origin ${ROCPROFILER_SDK_COMMIT} \
+    && git checkout -q FETCH_HEAD
+RUN cd /src-rps/projects/rocprofiler-sdk \
+    && cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH="$SDK_DEV;$SYSDEPS" \
+        -DROCM_PATH="$SDK_DEV" \
+        -DCMAKE_INSTALL_PREFIX=/rps-install \
+        -DROCPROFILER_BUILD_TESTS=OFF \
+        -DROCPROFILER_BUILD_SAMPLES=OFF \
+    && cmake --build build --parallel 16 --target rocprofiler-sdk-shared-library \
+    && cmake --install build --component development \
+    && cp build/lib/librocprofiler-sdk.so.1.*.* /rps-install/lib/ \
+    && grep -E 'define ROCPROFILER_SDK_(VERSION_STRING|GIT_REVISION)' \
+        /rps-install/include/rocprofiler-sdk/version.h \
+    && ls -l /rps-install/lib
 
 
 ###
@@ -337,7 +368,34 @@ RUN set -eux; \
         [ "$f" -ef "$ours" ] || ln -f "$ours" "$f"; \
     done
 
+# Eval only: the #14385 rocprofiler-sdk replaces the wheel's, hard linked onto every stock
+# file name like ROCr and HIP above, with its headers.
+RUN --mount=type=bind,from=build_rocm_runtime,src=/rps-install,target=/rps \
+    set -eux; \
+    src="$(echo /rps/lib/librocprofiler-sdk.so.1.*.*)"; \
+    ours="$SDK_DEV/lib/${src##*/}"; \
+    cp "$src" "$ours"; \
+    for f in "$SDK_DEV"/lib/librocprofiler-sdk.so* "$SDK_CORE"/lib/librocprofiler-sdk.so*; do \
+        [ -f "$f" ] && [ ! -L "$f" ] || continue; \
+        [ "$f" -ef "$ours" ] || ln -f "$ours" "$f"; \
+    done; \
+    rm -rf "$SDK_DEV/include/rocprofiler-sdk"; \
+    cp -r /rps/include/rocprofiler-sdk "$SDK_DEV/include/"
+
 RUN ldconfig
+
+RUN set -eux; \
+    want="$(sed -nE 's/^#define ROCPROFILER_SDK_VERSION_STRING[[:space:]]+"(.*)"/\1/p' \
+        "$SDK_DEV/include/rocprofiler-sdk/version.h")"; \
+    for f in "$SDK_DEV/lib/librocprofiler-sdk.so" "$SDK_DEV/lib/librocprofiler-sdk.so.1" \
+             "$SDK_CORE/lib/librocprofiler-sdk.so.1" \
+             "$(ldconfig -p | awk '$1 == "librocprofiler-sdk.so.1" { print $NF; exit }')"; do \
+        python3 -c 'import ctypes, sys; v = [ctypes.c_uint32() for _ in range(3)]; \
+assert ctypes.CDLL(sys.argv[1]).rocprofiler_get_version(*map(ctypes.byref, v)) == 0; \
+got = ".".join(str(x.value) for x in v); print(sys.argv[1], "rocprofiler-sdk", got); \
+assert got == sys.argv[2], (got, sys.argv[2])' "$f" "$want"; \
+    done; \
+    grep -E 'define ROCPROFILER_SDK_GIT_REVISION' "$SDK_DEV/include/rocprofiler-sdk/version.h"
 
 # Runtime libraries of mori's UMBP extension.
 RUN apt-get update \
