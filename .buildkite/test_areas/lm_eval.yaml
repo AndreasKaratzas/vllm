@@ -1089,6 +1089,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k8v4.txt
   mirror:
     amd:
+      parallelism: 22
       automatic_shard: true
       label: ":amd: (MI355 DPX) LM Eval TurboQuant k8v4"
       dind: false
@@ -1131,6 +1132,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t4nc.txt
   mirror:
     amd:
+      parallelism: 22
       label: ":amd: (MI355 DPX) LM Eval TurboQuant t4nc"
       dind: false
       automatic_shard: true
@@ -1173,6 +1175,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v4nc.txt
   mirror:
     amd:
+      parallelism: 22
       label: ":amd: (MI355 DPX) LM Eval TurboQuant k3v4nc"
       dind: false
       automatic_shard: true
@@ -1215,6 +1218,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc.txt
   mirror:
     amd:
+      parallelism: 22
       label: ":amd: (MI355 DPX) LM Eval TurboQuant t3nc"
       dind: false
       automatic_shard: true
