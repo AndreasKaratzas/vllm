@@ -15,7 +15,7 @@ ARG MORI_BRANCH="v1.2.5"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG ROCM_RUNTIME_COMMIT="d90ce21d395045d973cd566f33130ea2eb97c60b" # users/rasmith/10.2/completion_signal_backport: the 10.2.0 release base plus the completion signal work from develop
-# Eval only: head of ROCm/rocm-systems#14385 (rocprofiler-sdk completion signal fix).
+# Eval only: head of ROCm/rocm-systems#14385 plus the pool<Tp>::release lock fix below.
 ARG ROCPROFILER_SDK_COMMIT="00caebd435d79eef426495f5aac15fb55819ced7"
 
 # TheRock configuration
@@ -286,7 +286,8 @@ RUN mkdir -p /staging/lib \
     && cp -P /rocr-install/lib/libhsa-runtime64.so* /staging/lib/ \
     && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
     && ls -l /staging/lib
-# rocprofiler-sdk from ROCm/rocm-systems#14385, built against the ROCr above. Only the
+# rocprofiler-sdk from ROCm/rocm-systems#14385 with release() taking m_available_mtx
+# before its size check (pool growth race), built against the ROCr above. Only the
 # library and its headers ship: kernrec builds against the headers and requires them to
 # match the runtime version.
 ARG ROCPROFILER_SDK_COMMIT
@@ -300,7 +301,11 @@ RUN git init -q /src-rps && cd /src-rps \
     && git sparse-checkout init --cone \
     && git sparse-checkout set projects/rocprofiler-sdk shared cmake \
     && git fetch --filter=blob:none --depth 1 origin ${ROCPROFILER_SDK_COMMIT} \
-    && git checkout -q FETCH_HEAD
+    && git checkout -q FETCH_HEAD \
+    && f=projects/rocprofiler-sdk/source/lib/common/container/pool.hpp \
+    && sed -i -e '/^pool<Tp>::release(size_type idx)$/,/^}$/{/^        auto _write_lk = /d;s/^    if(idx < m_pool.size())$/    auto _write_lk = std::unique_lock<std::mutex>{m_available_mtx};\n&/}' "$f" \
+    && git diff "$f" \
+    && [ "$(git diff --numstat "$f")" = "$(printf '1\t1\t%s' "$f")" ]
 RUN cd /src-rps/projects/rocprofiler-sdk \
     && cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \

@@ -1116,7 +1116,7 @@ steps:
       - vllm/v1/attention/ops/turboquant_soa/
       - vllm/platforms/rocm.py
       commands:
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k8v4-rocm.txt
+      - ROCPROFILER_LOG_LEVEL=info pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k8v4-rocm.txt 2> >(sed -u -E '/^I[0-9]{4} [0-9:.]+ +[0-9]+ \w+\.[ch]pp:[0-9]+\] /{/Pool of type|Usage report for pool/!d}' >&2)
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t4nc"
   key: lm-eval-turboquant-t4nc
@@ -1159,7 +1159,7 @@ steps:
       - vllm/v1/attention/ops/turboquant_soa/
       - vllm/platforms/rocm.py
       commands:
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t4nc-rocm.txt
+      - ROCPROFILER_LOG_LEVEL=info pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t4nc-rocm.txt 2> >(sed -u -E '/^I[0-9]{4} [0-9:.]+ +[0-9]+ \w+\.[ch]pp:[0-9]+\] /{/Pool of type|Usage report for pool/!d}' >&2)
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant k3v4nc"
   key: lm-eval-turboquant-k3v4nc
@@ -1202,7 +1202,7 @@ steps:
       - vllm/v1/attention/ops/turboquant_soa/
       - vllm/platforms/rocm.py
       commands:
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v4nc-rocm.txt
+      - ROCPROFILER_LOG_LEVEL=info pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k3v4nc-rocm.txt 2> >(sed -u -E '/^I[0-9]{4} [0-9:.]+ +[0-9]+ \w+\.[ch]pp:[0-9]+\] /{/Pool of type|Usage report for pool/!d}' >&2)
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t3nc"
   key: lm-eval-turboquant-t3nc
@@ -1245,7 +1245,7 @@ steps:
       - vllm/v1/attention/ops/turboquant_soa/
       - vllm/platforms/rocm.py
       commands:
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt
+      - ROCPROFILER_LOG_LEVEL=info pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt 2> >(sed -u -E '/^I[0-9]{4} [0-9:.]+ +[0-9]+ \w+\.[ch]pp:[0-9]+\] /{/Pool of type|Usage report for pool/!d}' >&2)
 
 # Octave kernels are built only for gfx942 and gfx1100, so this runs on MI300.
 - label: ":amd: (MI300) LM Eval Octave KV Cache"
