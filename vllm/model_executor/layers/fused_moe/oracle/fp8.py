@@ -55,7 +55,7 @@ logger = init_logger(__name__)
 
 class Fp8MoeBackend(Enum):
     # No kernel backend. Used for:
-    # - out-of-tree platforms (OOT/TPU), where no backend is registered;
+    # - out-of-tree platforms (OOT/TPU) whose platform registers no experts;
     # - requantization sources (checkpoint methods that only dequantize weights
     #   for an online method), see `MoEKernelOracle.placeholder_backend`.
     NONE = "NONE"
@@ -87,6 +87,8 @@ class Fp8MoeBackend(Enum):
     AITER_MXFP8 = "AITER_MXFP8"
     # MXFP8 MoE via AITER Triton moe_gemm_a8w8 on gfx942.
     AITER_TRITON_MXFP8_MXFP8 = "AITER_TRITON_MXFP8_MXFP8"
+    # Experts registered via `Platform.get_moe_experts_cls`.
+    OOT = "OOT"
 
 
 def _get_priority_backends(
@@ -431,6 +433,7 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
 
     name = "Fp8"
     placeholder_backend = Fp8MoeBackend.NONE
+    oot_backend = Fp8MoeBackend.OOT
 
     def backend_to_kernel_cls(
         self, backend: Fp8MoeBackend
@@ -461,6 +464,7 @@ def select_fp8_moe_backend(
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
     activation_format = config.activation_format
     oracle = Fp8MoEKernelOracle(config, weight_key, activation_key)
+    AVAILABLE_BACKENDS = oracle.prepend_oot_backend(AVAILABLE_BACKENDS)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
@@ -534,10 +538,8 @@ def select_fp8_moe_backend(
             logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
 
-    # TODO(rob): per discussion with TPU team, we need a way to register
-    # MoE backends by OOT plugins, rather than having an explicit list
-    # of AVAILABLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
-    # a temporary measure until these register APIs are complete.
+    # Out-of-tree platforms without supported MoE experts (see
+    # `Platform.get_moe_experts_cls`) still get `NONE`.
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
             "No FP8 MoE backend supports the deployment configuration."
@@ -709,6 +711,7 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
             Fp8MoeBackend.XPU,
             Fp8MoeBackend.HPC,
+            Fp8MoeBackend.OOT,
             # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
             # the MXFP8 weights as-is — neither needs a load-time layout change.
             Fp8MoeBackend.EMULATION,

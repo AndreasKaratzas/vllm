@@ -40,6 +40,8 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
     TritonWNA16Experts,
 )
+from vllm.model_executor.layers.fused_moe.oracle import base as oracle_base
+from vllm.model_executor.layers.fused_moe.oracle import fp8 as fp8_oracle
 from vllm.model_executor.layers.fused_moe.oracle import int_wna16 as int_wna16_oracle
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
@@ -47,6 +49,7 @@ from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     Fp8MoEKernelOracle,
+    convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     map_fp8_backend,
     select_fp8_moe_backend,
@@ -95,6 +98,10 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
     W4A8Int8MoEKernelOracle,
     map_w4a8_int8_backend,
     select_w4a8_int8_moe_backend,
+)
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
+    ModelOptFp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -485,6 +492,140 @@ def test_fp8_aiter_env_selection(
             select()
         return
     assert select()[0] is expected
+
+
+def _oot_experts(weight_key) -> type[TritonExperts]:
+    class OOTExperts(TritonExperts):
+        @staticmethod
+        def is_supported_config(cls, moe_config, key, act_key, act_format):
+            return key == weight_key, None
+
+    return OOTExperts
+
+
+_OOT_INT4_EXPERTS = _oot_experts(kInt4Static)
+_OOT_FP8_EXPERTS = _oot_experts(kFp8Static128BlockSym)
+
+
+@pytest.mark.parametrize(
+    ("out_of_tree", "candidates", "expected"),
+    [
+        pytest.param(
+            True,
+            [_OOT_INT4_EXPERTS, _OOT_FP8_EXPERTS, _oot_experts(kFp8Static128BlockSym)],
+            (Fp8MoeBackend.OOT, _OOT_FP8_EXPERTS),
+            id="first-supported",
+        ),
+        pytest.param(
+            True, [_OOT_INT4_EXPERTS], (Fp8MoeBackend.NONE, None), id="other-format"
+        ),
+        pytest.param(True, [], (Fp8MoeBackend.NONE, None), id="unregistered"),
+        pytest.param(
+            False, [_OOT_FP8_EXPERTS], (Fp8MoeBackend.NONE, None), id="in-tree"
+        ),
+    ],
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_oot_platform_experts(out_of_tree, candidates, expected, monkeypatch):
+    """FP8 takes the first of an out-of-tree platform's format-neutral experts
+    that supports its keys; otherwise, and in-tree, selection is unchanged."""
+    monkeypatch.setattr(current_platform, "is_out_of_tree", lambda: out_of_tree)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "get_moe_experts_cls", lambda: candidates)
+    # Isolate from the in-tree kernels available on the test host.
+    monkeypatch.setattr(fp8_oracle, "backend_to_kernel_cls", lambda backend: [])
+
+    assert (
+        select_fp8_moe_backend(
+            make_dummy_moe_config(), kFp8Static128BlockSym, kFp8Dynamic128Sym
+        )
+        == expected
+    )
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_warns_when_all_oot_experts_are_rejected(monkeypatch):
+    """The rejection reasons must be visible without debug logging, since the
+    fallback may leave the layer without a kernel."""
+
+    class RejectedExperts(TritonExperts):
+        @staticmethod
+        def is_supported_config(cls, moe_config, key, act_key, act_format):
+            return False, "no such kernel"
+
+    monkeypatch.setattr(current_platform, "is_out_of_tree", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(
+        current_platform, "get_moe_experts_cls", lambda: [RejectedExperts]
+    )
+    monkeypatch.setattr(fp8_oracle, "backend_to_kernel_cls", lambda backend: [])
+
+    with patch.object(oracle_base.logger, "warning_once") as warning:
+        select_fp8_moe_backend(make_dummy_moe_config(), None, None)
+
+    message, *args = warning.call_args.args
+    assert "RejectedExperts: no such kernel" in message % tuple(args)
+
+
+@pytest.mark.usefixtures("default_vllm_config", "dist_init")
+def test_modelopt_fp8_runs_oot_experts_weight_hook(monkeypatch):
+    """OOT experts own their weight layout, so ModelOpt FP8 must run their hook."""
+
+    class LayoutExperts(TritonExperts):
+        @staticmethod
+        def is_supported_config(cls, moe_config, key, act_key, act_format):
+            return True, None
+
+        def process_weights_after_loading(self, layer):
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+
+    monkeypatch.setattr(current_platform, "is_out_of_tree", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "get_moe_experts_cls", lambda: [LayoutExperts]
+    )
+    method = ModelOptFp8MoEMethod(
+        ModelOptFp8Config("FP8", True, None, []),
+        make_dummy_moe_config(),
+    )
+    layer = torch.nn.Module()
+    layer._expert_routing_tables = lambda: None
+    method.create_weights(
+        layer, 1, 4, 8, torch.bfloat16, weight_loader=lambda *args, **kwargs: None
+    )
+    for param in layer.parameters():
+        param.data.fill_(1)
+
+    # Not `process_weights_after_loading`: its requantization needs a CUDA op.
+    method._setup_kernel(
+        layer,
+        layer.w13_weight,
+        layer.w2_weight,
+        layer.w13_weight_scale.max(dim=1).values,
+        layer.w2_weight_scale,
+        layer.w13_input_scale,
+        layer.w2_input_scale,
+    )
+
+    assert method.fp8_backend is Fp8MoeBackend.OOT
+    assert layer.w2_weight.shape == (1, 8, 4)
+
+
+def test_fp8_oot_backend_keeps_weight_layout():
+    """OOT experts receive the canonical weights; their own
+    `process_weights_after_loading` owns any layout change."""
+    w13, w2 = torch.empty(2, 8, 4), torch.empty(2, 4, 4)
+    w13_scale, w2_scale = torch.ones(2), torch.ones(2)
+
+    converted = convert_to_fp8_moe_kernel_format(
+        Fp8MoeBackend.OOT, Mock(spec=[]), w13, w2, w13_scale, w2_scale, None, None
+    )
+
+    assert all(
+        out is inp
+        for out, inp in zip(converted, (w13, w2, w13_scale, w2_scale), strict=True)
+    )
 
 
 _FORMAT = mk.FusedMoEActivationFormat
