@@ -63,6 +63,10 @@ class SpeculatorConfig:
     supports_pcp: ClassVar[bool] = False
     # See `SpeculativeConfig.prefill_context_kv_only`.
     supports_prefill_context_kv_only: ClassVar[bool] = False
+    # All persistent prompt state the drafter needs is in the target's KV
+    # cache. It can still use step-local target outputs or write draft slots
+    # on decode. A context-KV-only producer can omit this speculator.
+    uses_only_target_kv_for_context: ClassVar[bool] = False
 
     # --- SpeculativeConfig setup ---
 

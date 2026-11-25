@@ -85,7 +85,11 @@ def _run_engine_core_handshake(
     )
     monkeypatch.setattr(engine_core_module, "enable_envs_cache", lambda: None)
     monkeypatch.setattr(engine_core_module, "get_hash_fn_by_name", lambda name: None)
-    monkeypatch.setattr(engine_core_module, "init_none_hash", lambda hash_fn: None)
+    monkeypatch.setattr(
+        engine_core_module,
+        "init_none_hash",
+        lambda hash_fn: setattr(engine_core_module.kv_cache_utils, "NONE_HASH", b""),
+    )
     monkeypatch.setattr(
         engine_core_module, "get_request_block_hasher", lambda *args: None
     )
@@ -99,6 +103,7 @@ def _run_engine_core_handshake(
             prefill_schedule_interval=1,
         ),
         speculative_config=None,
+        runner_speculative_config=None,
         ec_transfer_config=None,
         is_mm_encoder_only=False,
         max_concurrent_batches=1,
