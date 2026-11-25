@@ -737,6 +737,14 @@ class SingleTypeKVCacheManager(ABC):
         """Cache blocks that are only retained once the request is freed."""
         return None
 
+    def estimate_cached_tokens(self, request_id: str) -> int:
+        """Estimate the prefix length this group has cached for the request."""
+        # Coverage grows along the block table: the last hashed block has the most.
+        for block in reversed(self.req_to_blocks.get(request_id, ())):
+            if block.block_hash_num_tokens:
+                return block.block_hash_num_tokens
+        return 0
+
     @classmethod
     @abstractmethod
     def find_longest_cache_hit(
@@ -1951,6 +1959,9 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # Prefix length of the partial tail whose cache entry moved from
+            # the request's block to its CoW copy.
+            self._moved_partial_tail_tokens: dict[str, int] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -2375,6 +2386,10 @@ class MambaManager(SingleTypeKVCacheManager):
                         # overwrites source_block.
                         assert req_blocks[block_idx] is source_block
                         self.block_pool.move_block_hashes(source_block, cow_block)
+                        if cow_block.block_hash_num_tokens:
+                            self._moved_partial_tail_tokens[request_id] = (
+                                cow_block.block_hash_num_tokens
+                            )
                         self._pending_cow_copies.append((source_block, cow_block))
                         source_block.ref_cnt += 1
                         producer_tail = self._producer_partial_tail_reqs.pop(
@@ -2443,6 +2458,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._req_chunk_ranges.pop(request_id, None)
             self._mid_block_states.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._moved_partial_tail_tokens.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
             # the pool now, so drop its not-yet-offered hand-offs rather than
@@ -2454,6 +2470,12 @@ class MambaManager(SingleTypeKVCacheManager):
                 if entry[0] != request_id
             ]
         return super().pop_blocks_for_free(request_id)
+
+    def estimate_cached_tokens(self, request_id: str) -> int:
+        cached_tokens = super().estimate_cached_tokens(request_id)
+        if not self.prefix_caching:
+            return cached_tokens
+        return max(cached_tokens, self._moved_partial_tail_tokens.get(request_id, 0))
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only
