@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
@@ -59,6 +60,10 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     # NB: `NONE` may carry other meanings in some enums (e.g. no backend on an
     # out-of-tree platform for fp8, kernel-less online mxfp4): see each enum.
     placeholder_backend: BackendT
+
+    # Backend standing for `Platform.get_moe_experts_cls`. Oracles that can hand
+    # unconverted weights to out-of-tree experts set it to their enum's `OOT`.
+    oot_backend: BackendT | None = None
 
     def __init__(
         self,
@@ -104,6 +109,21 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         not alias it with `= staticmethod(fn)`, which snapshots it at import.
         """
         raise NotImplementedError
+
+    def prepend_oot_backend(self, backends: list[BackendT]) -> list[BackendT]:
+        """Prefer the platform's own experts on out-of-tree platforms."""
+        if self.oot_backend is None or not current_platform.is_out_of_tree():
+            return backends
+        return [self.oot_backend, *backends]
+
+    def candidate_kernel_classes(
+        self, backend: BackendT
+    ) -> list[type[mk.FusedMoEExperts]]:
+        """Kernel classes to probe for `backend`, resolving `oot_backend` to the
+        platform's experts."""
+        if self.oot_backend is not None and backend is self.oot_backend:
+            return current_platform.get_moe_experts_cls()
+        return self.backend_to_kernel_cls(backend)
 
     def map_backend(self, runner_backend: MoEBackend) -> BackendT:
         """Map a user-facing `MoEBackend` (from the runner config) to
@@ -228,7 +248,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
             self.activation_key if activation_key is _UNSET else activation_key
         )
         if kernel_classes is None:
-            kernel_classes = self.backend_to_kernel_cls(backend)
+            kernel_classes = self.candidate_kernel_classes(backend)
         for kernel_cls in kernel_classes:
             supported, reason = kernel_cls.is_supported_config(
                 kernel_cls,
@@ -241,6 +261,13 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
                 return kernel_cls, rejected
             logger.debug_once(self.make_log_unsupported(backend, reason))
             rejected.append((kernel_cls, reason))
+        if rejected and backend is self.oot_backend:
+            logger.warning_once(
+                "None of the platform's MoE experts support this %s MoE "
+                "configuration: %s.",
+                self.name,
+                "; ".join(f"{cls.__name__}: {reason}" for cls, reason in rejected),
+            )
         return None, rejected
 
     def return_or_raise(
