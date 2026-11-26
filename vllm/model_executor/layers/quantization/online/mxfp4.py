@@ -17,12 +17,14 @@ if TYPE_CHECKING:
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
+from vllm.config.quantization import QuantSpec, layer_target_spec_scope
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
     _backend_activation_key,
+    _serves_requested_activation,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -41,7 +43,10 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 from vllm.model_executor.utils import replace_parameter
 
 # MXFP4 block size (elements per shared e8m0 scale), same as the checkpoint
@@ -186,14 +191,18 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION
             else _backend_activation_key(self.mxfp4_backend)
         )
-        if (
-            self.activation_quant_key != kMxfp4Dynamic
-            and self.activation_quant_key != backend_key
-        ):
+        honours_activation = (
+            _serves_requested_activation(
+                self.mxfp4_backend, self.activation_quant_key, self.moe
+            )
+            if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            else self.activation_quant_key == backend_key
+        )
+        if self.activation_quant_key != kMxfp4Dynamic and not honours_activation:
             raise NotImplementedError(
                 f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
-                f"activation={self.activation_quant_key}; it computes "
-                f"activation={backend_key}."
+                f"activation={self.activation_quant_key} for this layer's "
+                "activation/layout."
             )
 
     def maybe_roundup_sizes(
@@ -252,19 +261,22 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         w13_bias: torch.Tensor | None,
         w2_bias: torch.Tensor | None,
     ) -> None:
-        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_weight_to_mxfp4_moe_kernel_format(
-                mxfp4_backend=self.mxfp4_backend,
-                layer=layer,
-                w13_weight=w13,
-                w2_weight=w2,
-                w13_weight_scale=w13_scale,
-                w2_weight_scale=w2_scale,
-                w13_bias=w13_bias,
-                w2_bias=w2_bias,
-                use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
+        spec = QuantSpec(weight=kMxfp4Static, activation=self.activation_quant_key)
+        with layer_target_spec_scope(spec):
+            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+                convert_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=self.mxfp4_backend,
+                    layer=layer,
+                    w13_weight=w13,
+                    w2_weight=w2,
+                    w13_weight_scale=w13_scale,
+                    w2_weight_scale=w2_scale,
+                    w13_bias=w13_bias,
+                    w2_bias=w2_bias,
+                    activation=self.moe.activation,
+                    use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
+                )
             )
-        )
 
         # Handle weight/scale assignment based on backend type
         # Copied from `quark_moe.py`.
