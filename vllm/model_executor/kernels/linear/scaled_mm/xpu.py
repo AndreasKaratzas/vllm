@@ -65,6 +65,17 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
             return False, "XPUW8A8FP8Linear only support FP8 activation dtype"
         return True, None
 
+    @classmethod
+    def has_native_fp8(cls) -> bool:
+        """Whether the device runs FP8 GEMMs natively (Xe3p: CRI, Nova Lake-P).
+
+        False if the installed vllm-xpu-kernels lacks the arch query.
+        """
+        try:
+            return bool(torch.ops._xpu_C.is_xe3p_arch())
+        except (AttributeError, RuntimeError):
+            return False
+
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
@@ -293,3 +304,40 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs.t(),
             torch.Tensor(),
         )
+
+
+class XPUFp8W8A16BlockScaledMMKernel(XPUFp8BlockScaledMMKernel):
+    """Weight-only block FP8 for XPUs without native FP8 (e.g. Arc B-series).
+
+    Reuses the weight/scale preparation of XPUFp8BlockScaledMMKernel but feeds
+    the 16-bit activation straight into oneDNN fp8_gemm_w8a16 with the
+    checkpoint block scales, skipping the activation quantization.
+    """
+
+    apply_input_quant = False
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        if config.input_dtype not in (torch.float16, torch.bfloat16):
+            return False, "XPUFp8W8A16BlockScaledMM needs fp16/bf16 activations"
+        return super().can_implement(config)
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        # A is the unquantized 16-bit activation (As is an unused placeholder).
+        # B.t() is the [K, N] view and Bs.t() the contiguous [k_blocks,
+        # n_blocks] scale, as in the W8A8 kernel.
+        return torch.ops._xpu_C.fp8_gemm_w8a16(A, B.t(), Bs.t(), None)
