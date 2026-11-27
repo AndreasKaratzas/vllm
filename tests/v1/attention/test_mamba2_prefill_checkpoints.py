@@ -10,6 +10,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     register_mamba_layers,
 )
+from vllm.model_executor.layers.mamba.ops import ssd_dispatch
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
 )
@@ -86,8 +87,8 @@ def _create_mamba2_builder(
     vllm_config.model_config.hf_text_config.mamba_chunk_size = CHUNK_SIZE
     spec = MambaSpec(
         block_size=MAMBA_BLOCK_SIZE,
-        shapes=((16, 64),),
-        dtypes=(torch.float16,),
+        shapes=((16, 64), (8, 64, 128)),
+        dtypes=(torch.float16, torch.float16),
     )
     register_mamba_layers(
         vllm_config,
@@ -137,6 +138,24 @@ def test_builder_emits_one_checkpoint_entry_per_prefill_row():
     # also proves the chunk split actually landed on the checkpoint.
     ckpt_chunk = meta.checkpoint_chunk_idx[0]
     assert meta.cu_chunk_seqlen_p[ckpt_chunk + 1].item() == 768
+
+
+def test_flashinfer_layout_captures_each_checkpoint_token():
+    """FlashInfer counterpart of the chunk split landing on the checkpoint.
+
+    Row 1 checkpoints 768 tokens in, at packed token 868: off FlashInfer's
+    128-token grid and not a sequence start. FlashInfer starts a segment at
+    each checkpoint token, so unless the row names that token, prefix caching
+    stores a wrong state.
+    """
+    builder = _create_mamba2_builder()
+    # FlashInfer can't be selected on this test's device; its layout can be.
+    builder.ssd_metadata_builder = (
+        ssd_dispatch.FlashInferSSDKernel.make_metadata_builder(builder.kv_cache_spec)
+    )
+    meta = _build(builder, seq_lens=[100, 900], query_lens=[100, 900])
+
+    assert meta.checkpoint_token_indices_p.tolist() == [-1, 868]
 
 
 def test_update_block_table_regathers_checkpoint_blocks():

@@ -48,7 +48,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.config.profiler import ProfilerConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field, hash_config
@@ -147,7 +147,7 @@ def test_flashinfer_replayssm_validates_config(
             architecture="NemotronHForCausalLM",
             dtype=input_dtype,
         ),
-        mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
+        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=pp_size, use_ubatching=use_ubatching
         ),
@@ -187,6 +187,7 @@ def test_triton_replayssm_spec_decode_validates_config(
         ),
         mamba_config=SimpleNamespace(
             backend=MambaBackendEnum.TRITON,
+            effective_decode_backend=MambaBackendEnum.TRITON,
             enable_stochastic_rounding=stochastic_rounding,
         ),
         parallel_config=SimpleNamespace(
@@ -362,6 +363,24 @@ def test_sampling_replay_config(config, message):
             VllmConfig._verify_sampling_replay_config(config)
 
 
+@pytest.mark.parametrize(
+    ("shared_backend", "decode_backend", "expected"),
+    [
+        ("triton", "flashinfer", True),
+        ("flashinfer", "triton", False),
+        ("flashinfer", None, True),
+    ],
+)
+def test_use_flashinfer_replayssm_follows_decode_backend(
+    shared_backend, decode_backend, expected
+):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(use_replayssm=True),
+        mamba_config=MambaConfig(backend=shared_backend, decode_backend=decode_backend),
+    )
+    assert VllmConfig.use_flashinfer_replayssm.fget(config) is expected
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -375,7 +394,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             supports_replayssm=True,
             architecture="KimiLinearForCausalLM",
         ),
-        mamba_config=SimpleNamespace(
+        mamba_config=MambaConfig(
             backend=MambaBackendEnum.TRITON,
             enable_stochastic_rounding=False,
         ),
