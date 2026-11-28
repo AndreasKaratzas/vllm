@@ -275,6 +275,15 @@ def _reshape_cache_per_token_head(
     )
 
 
+# gfx950: the per-token-head write is faster with one 64-lane wave per
+# (token, head) program than with four. Shared by the INT4 write launch.
+ONE_WAVE_WRITE = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    ONE_WAVE_WRITE = on_gfx950()
+
+
 # Mapping from cache torch dtype to (QUANT_MAX, QUANT_MIN) for the
 # per-token-head quantization kernel.
 _PER_TOKEN_HEAD_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
@@ -335,7 +344,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     block_size = key_cache.shape[1]
 
     if current_platform.is_rocm() or current_platform.is_xpu():
-        num_warps = 4
+        num_warps = 1 if ONE_WAVE_WRITE else 4
     else:
         num_warps = min(16, max(1, head_size_padded // 32))
 

@@ -31,6 +31,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     softmax_step,
     store_segm_reduce_scalars,
 )
+from vllm.v1.attention.ops.triton_reshape_and_cache_flash import ONE_WAVE_WRITE
 from vllm.v1.attention.ops.triton_unified_attention import (
     kv_tile_alignment,
     reduce_segments,
@@ -278,7 +279,7 @@ def _run_reshape_kernel(
         max(head_size, head_size_v) // packing_factor
     )
     if current_platform.is_rocm() or current_platform.is_xpu():
-        num_warps = 4
+        num_warps = 1 if ONE_WAVE_WRITE else 4
     else:
         num_warps = min(16, max(1, packed_padded // 32))
 
